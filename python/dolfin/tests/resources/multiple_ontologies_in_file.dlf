@@ -1,0 +1,6 @@
+concept A:
+  has x: string
+
+
+concept B:
+  has y: int

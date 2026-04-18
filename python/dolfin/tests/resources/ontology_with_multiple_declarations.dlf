@@ -1,0 +1,6 @@
+enum Status:
+  active | inactive
+concept Person:
+  has name: string
+  has status: Status
+property worksFor: Person -> Organization

@@ -1,0 +1,653 @@
+// LALRPOP grammar for the Dolfin ontology language
+//
+// This grammar handles the indentation-based syntax of Dolfin using
+// INDENT/DEDENT/NEWLINE tokens provided by the custom lexer.
+
+use crate::ast::*;
+use crate::lexer::Token;
+use crate::error::{LexerError, Location, Span, SpannedString};
+
+grammar;
+
+// ============================================================================
+// EXTERN DEFINITIONS
+// ============================================================================
+
+extern {
+    type Location = Location;
+    type Error = LexerError;
+
+    enum Token {
+        // Keywords
+        "package" => Token::Package,
+        "prefix" => Token::Prefix,
+        "@iri_name" => Token::IriName,
+        "as" => Token::As,
+        "concept" => Token::Concept,
+        "property" => Token::Property,
+        "one of" => Token::OneOf,
+        "rule" => Token::Rule,
+        "match" => Token::Match,
+        "then" => Token::Then,
+        "sub" => Token::Sub,
+        "has" => Token::Has,
+        "key" => Token::Key,
+        "a" => Token::Is,
+        
+        // Quantifier keywords
+        "all" => Token::All,
+        "none" => Token::None,
+        "at_least" => Token::AtLeast,
+        "at_most" => Token::AtMost,
+        "exactly" => Token::Exactly,
+        "between" => Token::Between,
+        "of" => Token::Of,
+
+        // Cardinality keywords
+        "one" => Token::One,
+        "any" => Token::Any,
+        "some" => Token::Some,
+        "optional" => Token::Optional,
+        
+        // Primitive types
+        "string" => Token::TString,
+        "int" => Token::TInt,
+        "float" => Token::TFloat,
+        "boolean" => Token::TBoolean,
+        
+        // Literals
+        INT => Token::Int(<i64>),
+        FLOAT => Token::Float(<f64>),
+        STRING => Token::String(<String>),
+        BOOLEAN => Token::Boolean(<bool>),
+        IRI => Token::Iri(<String>),
+        
+        // Identifiers
+        NAME => Token::Name(<String>),
+        VARIABLE => Token::Variable(<String>),
+        
+        // Punctuation
+        ":" => Token::Colon,
+        "," => Token::Comma,
+        "." => Token::Dot,
+        "->" => Token::Arrow,
+        ".." => Token::DoubleDot,
+        "*" => Token::Star,
+        "|" => Token::Pipe,
+        "^^" => Token::DoubleCaret,
+
+        // Brackets
+        "[" => Token::LBracket,
+        "]" => Token::RBracket,
+
+        // Arithmetic operators
+        "+" => Token::Plus,
+        "-" => Token::Minus,
+        "/" => Token::Slash,
+        "(" => Token::LParen,
+        ")" => Token::RParen,
+
+        // Comparison operators
+        "=" => Token::Equal,
+        "!=" => Token::NotEqual,
+        "<" => Token::LessThan,
+        "<=" => Token::LessEqual,
+        ">" => Token::GreaterThan,
+        ">=" => Token::GreaterEqual,
+        
+        // Indentation tokens
+        INDENT => Token::Indent,
+        DEDENT => Token::Dedent,
+        NEWLINE => Token::Newline,
+        EOF => Token::Eof,
+    }
+}
+
+// ============================================================================
+// MACROS
+// ============================================================================
+
+// Comma-separated list with at least one element
+Comma<T>: Vec<T> = {
+    <first:T> <rest:("," <T>)*> => {
+        let mut v = vec![first];
+        v.extend(rest);
+        v
+    }
+};
+
+// Optional element
+Optional<T>: Option<T> = {
+    <T> => Some(<>),
+    => None,
+};
+
+// ============================================================================
+// TOP-LEVEL
+// ============================================================================
+
+/// An ontology file (the main entry point for .dlf files except package.dlf)
+pub OntologyFile: OntologyFile = {
+    NEWLINE*
+    <start:@L>
+    <iri_name:IriNameAnnotation?>
+    <prefixes:PrefixStmt*>
+    // NEWLINE*
+    <declarations:Declaration*>
+    EOF <end:@R> => OntologyFile::new(
+        iri_name, 
+        prefixes.into_iter().flatten().collect(), 
+        declarations,
+        Some(Span { start, end }),
+    ),
+};
+
+
+// ============================================================================
+// PACKAGE MANIFEST (package.dlf)
+// ============================================================================
+
+/// Package definition for package.dlf files
+pub PackageFile: PackageFile = {
+    <start:@L> "package" <name:QualifiedNameOrIRI> ":" NEWLINE
+    INDENT <fields:PackageField+> DEDENT EOF <end:@R>
+    => {
+        let mut manifest = PackageFile {
+            name,
+            dolfin_version: String::new(),
+            version: String::new(),
+            author: None,
+            description: None,
+            span: Some(Span { start, end }),
+        };
+        for field in fields {
+            match field {
+                PackageField::DolfinVersion(v) => manifest.dolfin_version = v,
+                PackageField::Version(v) => manifest.version = v,
+                PackageField::Author(v) => manifest.author = Some(v),
+                PackageField::Description(v) => manifest.description = Some(v),
+            }
+        }
+        manifest
+    }
+};
+
+PackageField: PackageField = {
+    <l:@L> <f:NAME> <r:@R> <v:STRING> NEWLINE =>? {
+        match f.as_str() {
+            "dolfin_version" => Ok(PackageField::DolfinVersion(v)),
+            "version" => Ok(PackageField::Version(v)),
+            "author" => Ok(PackageField::Author(v)),
+            "description" => Ok(PackageField::Description(v)),
+            _ => Err(lalrpop_util::ParseError::UnrecognizedToken {
+                token: (l, Token::Name(f), r),
+                expected: vec![
+                    "dolfin_version".to_string(),
+                    "version".to_string(),
+                    "author".to_string(),
+                    "description".to_string(),
+                ],
+            }),
+        }
+    }    
+};
+
+// ============================================================================
+// PREFIX
+// ============================================================================
+
+PrefixStmt: Vec<PrefixDecl> = {
+    "prefix" <target:PrefixTarget> => target
+};
+
+PrefixTarget: Vec<PrefixDecl> = {
+    // Hierarchical prefix: prefix com.example:
+    //   Person
+    //   Organization as Org
+    <prefix:QualifiedName> ":" NEWLINE INDENT <children:PrefixTarget+> DEDENT => {
+        children.into_iter()
+            .flatten()
+            .map(|imp| PrefixDecl {
+                path: prefix.join(&imp.path),
+                alias: imp.alias,
+                span: imp.span,
+            })
+            .collect()
+    },
+    // Aliased prefix: prefix com.example.Person as P
+    <start:@L> <path:QualifiedNameOrIRI> "as" <alias:NAME> <end:@R> NEWLINE => {
+        vec![PrefixDecl { path, alias, span: Some(Span { start, end }) }]
+    },
+    // Simple prefix: prefix com.example.Person
+    <start:@L> <path:QualifiedNameOrIRI> <end:@R> NEWLINE => {
+        let alias = path.last().to_string();
+        vec![PrefixDecl { path, alias, span: Some(Span { start, end }) }]
+    },
+};
+
+// ============================================================================
+// ANNOTATIONS
+// ============================================================================
+
+/// IRI name annotation to override the derived IRI segment
+IriNameAnnotation: String = {
+    "@iri_name" <name:STRING> NEWLINE+ => name,
+};
+
+// ============================================================================
+// ONTOLOGY
+// ============================================================================
+
+/// Top-level declarations in an ontology file
+Declaration: Declaration = {
+    <c:ConceptDef> NEWLINE? => Declaration::Concept(c),
+    <p:PropertyDef> NEWLINE? => Declaration::Property(p),
+    <r:RuleDef> NEWLINE? => Declaration::Rule(r),
+};
+
+
+// ============================================================================
+// CONCEPT
+// ============================================================================
+
+ConceptDef: ConceptDef = {
+    <start:@L> "concept" <ns:@L> <name:NAME> <ne:@R> ":" NEWLINE
+    INDENT
+    <end:@R>
+    <members:ConceptMember+>
+    DEDENT  => {
+        let mut parents = Vec::new();
+        let mut has_declarations = Vec::new();
+        let mut span = Span { start, end };
+
+        let mut one_of: Option<Vec<OneOfVariant>> = None;
+
+        for (member, mspan) in members {
+            match member {
+                ConceptMember::Sub(p) => {
+                    span = span.merge(&mspan);
+                    parents.extend(p)
+                },
+                ConceptMember::Has(h) => {
+                    span = span.merge(&mspan);
+                    has_declarations.push(h)
+                },
+                ConceptMember::OneOf(variants) => {
+                    // Check if at most one section "one of" is present
+                    span = span.merge(&mspan);
+                    one_of = Some(variants);
+                },
+            }
+        }
+
+        ConceptDef::new(name, parents, has_declarations, one_of, Some(span), Some(Span { start: ns, end: ne }))
+    },
+    // Concept without body (just declaration)
+    <start:@L> "concept" <ns:@L> <name:NAME> <ne:@R> <end:@R> NEWLINE => ConceptDef::new(name, vec![], vec![], None, Some(Span { start, end }), Some(Span { start: ns, end: ne })),
+};
+
+ConceptMember: (ConceptMember, Span) = {
+    <s:SubDeclaration> => (ConceptMember::Sub(s.0), s.1),
+    <h:HasDeclaration> => (ConceptMember::Has(h.clone()), h.span.unwrap()),
+    <oo:OneOfBlock> => (ConceptMember::OneOf(oo.0), oo.1),
+};
+
+OneOfBlock: (Vec<OneOfVariant>, Span) = {
+    <start:@L> "one of" ":" NEWLINE 
+    INDENT <end:@R>
+      <variants:OneOfItem+>
+    DEDENT => {
+      let mut span = Span { start, end };
+      for v in &variants {
+        if let Some(vspan) = v.span {
+          span = span.merge(&vspan);
+        }
+      }
+      (variants, span)
+    }
+};
+
+OneOfItem: OneOfVariant = {
+    <start:@L> <name:NAME> <pre_end:@R> <constraints:NoCmpConstraintBlock?> <end:@R> NEWLINE => {
+        if constraints.is_some() {
+          OneOfVariant { name, constraints, span: Some(Span { start, end }) }
+        } else {
+          OneOfVariant { name, constraints, span: Some(Span { start, end: pre_end }) }
+        }
+    }
+};
+
+SubDeclaration: (Vec<TypeRef>, Span) = {
+    <start:@L> "sub" <types:Comma<TypeRef>> <end:@R> NEWLINE => (types, Span { start, end }),
+};
+
+HasDeclaration: HasDeclaration = {
+    <start:@L> "has" <is_key:("key")?> <name:NAME> ":" <cardinality:Optional<Cardinality>> <type_ref:TypeRef> <end:@R> NEWLINE => {
+        HasDeclaration { name, is_key: is_key.is_some(), cardinality, type_ref, span: Some(Span { start, end }) }
+    }
+};
+
+// ============================================================================
+// PROPERTY
+// ============================================================================
+
+PropertyDef: PropertyDef = {
+    <start:@L> "property" <name_start:@L> <name:NAME> <name_end:@R> ":" 
+        <domain_cardinality:Optional<Cardinality>> <domain:TypeRef> 
+        "->" 
+        <range_cardinality:Optional<Cardinality>> <range:TypeRef> 
+    <end:@R> => {
+        PropertyDef {
+            name: SpannedString::new(name, Some(Span { start: name_start, end: name_end })),
+            domain_cardinality,
+            domain,
+            range_cardinality,
+            range,
+            span: Some(Span { start, end }),
+        }
+    }
+};
+
+// ============================================================================
+// RULE
+// ============================================================================
+
+RuleDef: RuleDef = {
+    <start:@L> "rule" <name:NAME> ":" NEWLINE
+    INDENT <match_block:MatchBlock> <then_block:ThenBlock>
+    DEDENT <end:@R> => RuleDef { name, match_block, then_block, span: Some(Span { start, end }) }
+};
+
+MatchBlock: MatchBlock = {
+    <start:@L> "match" ":" NEWLINE
+    INDENT
+    <patterns:MatchPattern+>
+    DEDENT <end:@R> => MatchBlock { patterns, span: Some(Span { start, end }) }
+};
+
+ThenBlock: ThenBlock = {
+    <start:@L> "then" ":" NEWLINE
+    INDENT
+    <items:ThenItem+>
+    DEDENT <end:@R> => ThenBlock { items, span: Some(Span { start, end }) }
+};
+
+MatchPattern: Pattern = {
+    <start:@L> <subject:Subject> <property:QualifiedName> <object:Object> <end:@R> NEWLINE =>
+        Pattern::Triple { subject, property, object, span: Some(Span { start, end }) },
+    <start:@L> <subject:Subject> <property:QualifiedName> <block:ConstraintBlock> <end:@R> NEWLINE =>
+        Pattern::Triple { subject, property, object: Object::Constraint { block }, span: Some(Span { start, end }) },
+    <start:@L> <subject:Subject> "a" <type_ref:TypeRef> <end:@R> NEWLINE =>
+        Pattern::Type { subject, type_ref, span: Some(Span { start, end }) },
+    <start:@L> <quantifier:Quantifier> <variable:VARIABLE> <constraint:Optional<ConstraintBlock>> ":" 
+        NEWLINE INDENT <patterns:MatchPattern+> DEDENT <end:@R> => {
+        Pattern::Quantified {
+            quantifier,
+            variable,
+            constraint,
+            patterns,
+            span: Some(Span { start, end }),
+        }
+    },
+};
+
+Quantifier: Quantifier = {
+    <start:@L> "all" <end:@R> => Quantifier::All { span: Some(Span { start, end })},
+    <start:@L> "none" <end:@R> => Quantifier::None { span: Some(Span { start, end })},
+    <start:@L> "at_least" <value:CardinalityValue> <end:@R> => Quantifier::AtLeast { value, span: Some(Span { start, end }) },
+    <start:@L> "at_most" <value:CardinalityValue> <end:@R> => Quantifier::AtMost { value, span: Some(Span { start, end }) },
+    <start:@L> "exactly" <value:CardinalityValue> <end:@R> => Quantifier::Exactly { value, span: Some(Span { start, end }) },
+    <start:@L> "between" <min:CardinalityValue> "," <max:CardinalityValue> <end:@R> => Quantifier::Between { min, max, span: Some(Span { start, end }) },
+};
+
+ThenItem: ThenItem = {
+    <Assertion> NEWLINE => <>,
+    <NestedRule> => ThenItem::NestedRule { rule: <> },
+};
+
+Assertion: ThenItem = {
+    <start:@L> <subject:Subject> <property:QualifiedName> <object:Object> <end:@R> =>
+        ThenItem::AssertionTriple { 
+            assertion: Assertion { 
+                subject, 
+                property, 
+                object,
+                span: Some(Span { start, end }),
+            },
+            span: Some(Span { start, end }),
+        },
+    <start:@L> <subject:Subject> <property:QualifiedName> <block:NoCmpConstraintBlock> <end:@R> =>
+        ThenItem::AssertionTriple { 
+            assertion: Assertion { 
+                subject, 
+                property, 
+                object: Object::Constraint { block },
+                span: Some(Span { start, end }),
+            },
+            span: Some(Span { start, end }),
+        },
+    <start:@L> <subject:Subject> "a" <l:@L> <type_ref:TypeRef> <r:@R> <end:@R> =>?
+        match type_ref {
+            TypeRef::Named { name: typing, .. } => Ok(ThenItem::AssertionTyping { 
+                subject, 
+                typing,
+                span: Some(Span { start, end }),
+            }),
+            TypeRef::Primitive { kind, .. } => Err(lalrpop_util::ParseError::UnrecognizedToken {
+                token: (l, Token::Name(kind.to_string()), r),
+                expected: vec![
+                    "Qualified name that is not a primitive".to_string(),
+                ],
+            }),
+        },
+};
+
+NestedRule: RuleDef = {
+    <start:@L> <match_block:MatchBlock> <then_block:ThenBlock> <end:@R> => {
+        RuleDef {
+            name: "anonymous".to_string(),
+            match_block,
+            then_block,
+            span: Some(Span { start, end }),
+        }
+    }
+};
+
+// ============================================================================
+// SUBJECTS AND OBJECTS
+// ============================================================================
+
+Subject: Subject = {
+    <start:@L> <v:VARIABLE> <end:@R> => Subject::Variable { name: v, span: Some(Span { start, end }) },
+    <start:@L> <n:QualifiedName> <end:@R> => Subject::Constant { name: n, span: Some(Span { start, end }) },
+    <start:@L> <b:ConstraintBlock> <end:@R> => Subject::Constraint { block: b, span: Some(Span { start, end }) },
+};
+
+Object: Object = {
+    <start:@L> <v:VARIABLE> <end:@R> => Object::Variable { name: v, span: Some(Span { start, end }) },
+    <start:@L> <v:Expr> <end:@R> => Object::Literal { value: v, span: Some(Span { start, end }) },
+    <start:@L> <n:QualifiedName> <end:@R> => Object::Constant { value: n, span: Some(Span { start, end }) },
+};
+
+// ============================================================================
+// CONSTRAINTS
+// ============================================================================
+
+NoCmpConstraintBlock: ConstraintBlock = {
+    <start:@L> "[" <constraints:Comma<NoCmpConstraint>> "]" <end:@R> => ConstraintBlock { constraints, span: Some(Span { start, end }) }
+};
+
+NoCmpConstraint: Constraint = {
+    <start:@L> "a" <type_ref:TypeRef> <end:@R> => Constraint::TypeIs { type_ref, span: Some(Span { start, end }) },
+    <start:@L> <property:QualifiedName> <value:Object> <end:@R> => Constraint::PropertyValue { property, value, span: Some(Span { start, end }) },
+    <start:@L> <property:QualifiedName> <block:NoCmpConstraintBlock> <end:@R> => {
+        Constraint::PropertyConstraint { property, block, span: Some(Span { start, end }) }
+    },
+};
+
+ConstraintBlock: ConstraintBlock = {
+    <start:@L> "[" <constraints:Comma<Constraint>> "]" <end:@R> => ConstraintBlock { constraints, span: Some(Span { start, end }) }
+};
+
+Constraint: Constraint = {
+    <start:@L> "a" <type_ref:TypeRef> <end:@R> => Constraint::TypeIs { type_ref, span: Some(Span { start, end }) },
+    <start:@L> <op:ComparisonOp> <value:Expr> <end:@R> => Constraint::Comparison { operator: op, value, span: Some(Span { start, end }) },
+    <start:@L> <property:QualifiedName> <value:Object> <end:@R> => Constraint::PropertyValue { property, value, span: Some(Span { start, end }) },
+    <start:@L> <property:QualifiedName> <block:ConstraintBlock> <end:@R> => {
+        Constraint::PropertyConstraint { property, block, span: Some(Span { start, end }) }
+    },
+};
+
+ComparisonOp: ComparisonOp = {
+    "=" => ComparisonOp::Equal,
+    "!=" => ComparisonOp::NotEqual,
+    "<" => ComparisonOp::LessThan,
+    "<=" => ComparisonOp::LessEqual,
+    ">" => ComparisonOp::GreaterThan,
+    ">=" => ComparisonOp::GreaterEqual,
+};
+
+// ============================================================================
+// TYPES
+// ============================================================================
+
+TypeRef: TypeRef = {
+    <start:@L> <n:QualifiedName> <end:@R> => TypeRef::Named { name: n, span: Some(Span { start, end }) },
+    <PrimitiveType> => <>,
+};
+
+PrimitiveType: TypeRef = {
+    <start:@L> "string" <end:@R> => TypeRef::Primitive { kind: PrimitiveKind::String, span: Some(Span { start, end }) },
+    <start:@L> "int" <end:@R> => TypeRef::Primitive { kind: PrimitiveKind::Int, span: Some(Span { start, end }) },
+    <start:@L> "float" <end:@R> => TypeRef::Primitive { kind: PrimitiveKind::Float, span: Some(Span { start, end }) },
+    <start:@L> "boolean" <end:@R> => TypeRef::Primitive { kind: PrimitiveKind::Boolean, span: Some(Span { start, end }) },
+};
+
+QualifiedName: QualifiedName = {
+    <start:@L> <first:NAME> <rest:("." <NAME>)*> <end:@R> => {
+        let mut parts = vec![first];
+        parts.extend(rest);
+        QualifiedName::new(parts, Some(Span { start, end }))
+    }
+};
+
+QualifiedNameOrIRI: QualifiedName = {
+    <QualifiedName> => <>,
+    <start:@L> <iri:IRI> <end:@R> => QualifiedName { 
+        parts: vec![iri], 
+        span: Some(Span { start, end }),
+    }
+};
+
+
+// ============================================================================
+// CARDINALITY
+// ============================================================================
+
+Cardinality: Cardinality = {
+    <start:@L> "one" <end:@R> => Cardinality::One { span: Some(Span { start, end })},
+    <start:@L> "any" <end:@R> => Cardinality::Any { span: Some(Span { start, end })},
+    <start:@L> "some" <end:@R> => Cardinality::Some { span: Some(Span { start, end })},
+    <start:@L> "optional" <end:@R> => Cardinality::Optional { span: Some(Span { start, end })},
+    <start:@L> <n:INT> <end:@R> => Cardinality::Exact { value: n as usize, span: Some(Span { start, end }) },
+    <start:@L> <min:INT> ".." <max:INT> <end:@R> => Cardinality::Range { 
+        min: min as usize, 
+        max: Some(max as usize),
+        span: Some(Span { start, end }),
+    },
+    <start:@L> <min:INT> ".." "*" <end:@R> => Cardinality::Range { 
+        min: min as usize, 
+        max: None,
+        span: Some(Span { start, end }),
+    },
+};
+
+CardinalityValue: CardinalityValue = {
+    <start:@L> <n:INT> <end:@R> => CardinalityValue::Int { value: n as usize, span: Some(Span { start, end }) },
+    <start:@L> <v:VARIABLE> <end:@R> => CardinalityValue::Variable { name: v, span: Some(Span { start, end }) },
+};
+
+// ============================================================================
+// LITERALS
+// ============================================================================
+
+Literal: Literal = {
+    <start:@L> <n:INT> <end:@R> => Literal::Int { value: n, span: Some(Span { start, end })},
+    <start:@L> <n:FLOAT> <end:@R> => Literal::Float { value: n, span: Some(Span { start, end })},
+    <start:@L> <s:STRING> <end:@R> => Literal::String { value: s, span: Some(Span { start, end })},
+    <start:@L> <b:BOOLEAN> <end:@R> => Literal::Boolean { value: b, span: Some(Span { start, end })},
+    <start:@L> <i:IRI> <end:@R> => Literal::Iri { value: i, span: Some(Span { start, end })},
+};
+
+// ============================================================================
+// EXPRESSIONS
+// ============================================================================
+
+Expr: Expr = {
+    <AddExpr> => <>,
+};
+
+AddExpr: Expr = {
+    <start:@L> <left:AddExpr> "+" <right:MulExpr> <end:@R> => Expr::BinaryOp {
+        op: BinaryOp::Add,
+        left: Box::new(left),
+        right: Box::new(right),
+        span: Some(Span { start, end }),
+    },
+    <start:@L> <left:AddExpr> "-" <right:MulExpr> <end:@R> => Expr::BinaryOp {
+        op: BinaryOp::Sub,
+        left: Box::new(left),
+        right: Box::new(right),
+        span: Some(Span { start, end }),
+    },
+    <MulExpr> => <>,
+};
+
+MulExpr: Expr = {
+    <start:@L> <left:MulExpr> "*" <right:UnaryExpr> <end:@R> => Expr::BinaryOp {
+        op: BinaryOp::Mul,
+        left: Box::new(left),
+        right: Box::new(right),
+        span: Some(Span { start, end }),
+    },
+    <start:@L> <left:MulExpr> "/" <right:UnaryExpr> <end:@R> => Expr::BinaryOp {
+        op: BinaryOp::Div,
+        left: Box::new(left),
+        right: Box::new(right),
+        span: Some(Span { start, end }),
+    },
+    <UnaryExpr> => <>,
+};
+
+UnaryExpr: Expr = {
+    <start:@L> "-" <operand:UnaryExpr> <end:@R> => Expr::UnaryOp {
+        op: UnaryOp::Neg,
+        operand: Box::new(operand),
+        span: Some(Span { start, end }),
+    },
+    <PrimaryExpr> => <>,
+};
+
+PrimaryExpr: Expr = {
+    <start:@L> "(" <e:Expr> ")" <end:@R> => e,
+    <start:@L> <n:INT> <end:@R> => Expr::Literal {
+        value: Literal::Int { value: n, span: Some(Span { start, end }) },
+        span: Some(Span { start, end }),
+    },
+    <start:@L> <n:FLOAT> <end:@R> => Expr::Literal {
+        value: Literal::Float { value: n, span: Some(Span { start, end }) },
+        span: Some(Span { start, end }),
+    },
+    <start:@L> <s:STRING> <end:@R> => Expr::Literal {
+        value: Literal::String { value: s, span: Some(Span { start, end }) },
+        span: Some(Span { start, end }),
+    },
+    <start:@L> <b:BOOLEAN> <end:@R> => Expr::Literal {
+        value: Literal::Boolean { value: b, span: Some(Span { start, end }) },
+        span: Some(Span { start, end }),
+    },
+    <start:@L> <i:IRI> <end:@R> => Expr::Literal {
+        value: Literal::Iri { value: i, span: Some(Span { start, end }) },
+        span: Some(Span { start, end }),
+    },
+};

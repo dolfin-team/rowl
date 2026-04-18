@@ -1,0 +1,35 @@
+prefix com.example.common:
+  Address
+  ContactInfo as Contact
+
+
+enum EmploymentStatus:
+  fullTime | partTime | contractor | intern
+
+enum Department:
+  engineering
+  sales
+  marketing
+  hr
+  
+concept Person:
+  has firstName: string
+  has lastName: string
+  has email: string
+  has address: Address
+  
+concept Employee:
+  sub Person
+  has employeeId: string
+  has status: EmploymentStatus
+  has department: Department
+  has salary: float
+  has active: boolean
+  
+concept Manager:
+  sub Employee
+  has teamSize: int
+
+property worksFor: Employee -> Organization
+property manages: optional Manager -> some Employee
+property reportsTo: Employee -> optional Manager
