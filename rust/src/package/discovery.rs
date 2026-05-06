@@ -3,7 +3,6 @@
 use super::PackageError;
 use crate::ast::QualifiedName;
 use std::path::{Path, PathBuf};
-use walkdir::WalkDir;
 
 /// Information about a discovered ontology file.
 #[derive(Debug, Clone)]
@@ -21,9 +20,11 @@ pub struct DiscoveredFile {
 /// This function walks the directory tree and finds all `.dlf` files
 /// except for `package.dlf`. It computes the namespace for each file
 /// based on its path relative to the package root.
+#[cfg(feature = "fs")]
 pub fn discover_ontology_files<P: AsRef<Path>>(
     root: P,
 ) -> Result<Vec<DiscoveredFile>, PackageError> {
+    use walkdir::WalkDir;
     let root = root.as_ref();
     let mut files = Vec::new();
 

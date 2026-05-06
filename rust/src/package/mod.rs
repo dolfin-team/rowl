@@ -13,7 +13,9 @@ use crate::ast::{self, OntologyFile as ParsedOntologyFile, PackageFile, Qualifie
 use crate::comment::CommentMap;
 use crate::error::ParseError;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+#[cfg(feature = "fs")]
+use std::path::Path;
+use std::path::PathBuf;
 use thiserror::Error;
 
 /// Errors that can occur during package operations.
@@ -197,10 +199,11 @@ impl OntologyFile {
 /// 4. Resolves namespaces and prefixes
 ///
 /// # Arguments
-/// * `path` - Path to the package root directory (containing package.dlf)
+/// * `path` : Path to the package root directory (containing package.dlf)
 ///
 /// # Returns
 /// A fully loaded and resolved Package, or an error.
+#[cfg(feature = "fs")]
 pub fn load_package<P: AsRef<Path>>(path: P) -> Result<Package, Box<PackageError>> {
     let root = path.as_ref().to_path_buf();
 
@@ -320,6 +323,7 @@ pub fn load_package_from_memory(
 /// Check a package for errors without fully loading it.
 ///
 /// This performs validation but may skip some expensive operations.
+#[cfg(feature = "fs")]
 pub fn check_package<P: AsRef<Path>>(path: P) -> Result<Vec<String>, Box<PackageError>> {
     let package = load_package(path)?;
     let mut warnings = Vec::new();
