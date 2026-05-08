@@ -221,6 +221,9 @@ fn rowl(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<CardinalityValue>()?;
     m.add_class::<Quantifier>()?;
     m.add_class::<ComparisonOp>()?;
+    m.add_class::<FactDef>()?;
+    m.add_class::<FactAssertion>()?;
+    m.add_class::<FactValue>()?;
 
     // Error classes
     m.add_class::<ParseResult>()?;

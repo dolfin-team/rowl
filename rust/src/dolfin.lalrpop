@@ -33,7 +33,9 @@ extern {
         "has" => Token::Has,
         "key" => Token::Key,
         "a" => Token::Is,
-        
+        "fact" => Token::Fact,
+        "is" => Token::IsInverse,
+
         // Quantifier keywords
         "all" => Token::All,
         "none" => Token::None,
@@ -243,6 +245,7 @@ Declaration: Declaration = {
     <c:ConceptDef> NEWLINE? => Declaration::Concept(c),
     <p:PropertyDef> NEWLINE? => Declaration::Property(p),
     <r:RuleDef> NEWLINE? => Declaration::Rule(r),
+    <f:FactDef> NEWLINE? => Declaration::Fact(f),
 };
 
 
@@ -451,6 +454,61 @@ NestedRule: RuleDef = {
             span: Some(Span { start, end }),
         }
     }
+};
+
+// ============================================================================
+// FACT (INSTANCE DECLARATIONS)
+// ============================================================================
+
+/// A top-level fact: `fact <id> a <Type>, ...`
+FactDef: FactDef = {
+    // fact with body
+    <start:@L> "fact" <id:NAME> "a" <types:Comma<QualifiedName>> NEWLINE
+    INDENT <assertions:FactAssertion+> DEDENT <end:@R>
+    => FactDef { id, types, assertions, span: Some(Span { start, end }) },
+
+    // fact without body (bare declaration)
+    <start:@L> "fact" <id:NAME> "a" <types:Comma<QualifiedName>> <end:@R> NEWLINE
+    => FactDef { id, types, assertions: vec![], span: Some(Span { start, end }) },
+};
+
+/// One assertion line within a fact body
+FactAssertion: FactAssertion = {
+    // property_name value, value, ...
+    <start:@L> <name:NAME> <values:Comma<FactValue>> <end:@R> NEWLINE
+    => FactAssertion::Property { name, values, span: Some(Span { start, end }) },
+
+    // is <property> of <value>
+    <start:@L> "is" <property:QualifiedName> "of" <value:FactValue> <end:@R> NEWLINE
+    => FactAssertion::Inverse { property, value, span: Some(Span { start, end }) },
+
+    // a <ConceptName>  (type hint inside anonymous block)
+    <start:@L> "a" <type_ref:QualifiedName> <end:@R> NEWLINE
+    => FactAssertion::TypeHint { type_ref, span: Some(Span { start, end }) },
+};
+
+/// A value that can appear on the right-hand side of a property assertion
+FactValue: FactValue = {
+    // Literal scalar
+    <start:@L> <l:Literal> <end:@R>
+    => FactValue::Literal { value: l, span: Some(Span { start, end }) },
+
+    // :name  (local reference, empty prefix)
+    <start:@L> ":" <name:NAME> <end:@R>
+    => FactValue::Reference { qualifier: None, name, span: Some(Span { start, end }) },
+
+    // prefix:name  (prefixed reference)
+    <start:@L> <prefix:NAME> ":" <name:NAME> <end:@R>
+    => FactValue::Reference { qualifier: Some(prefix), name, span: Some(Span { start, end }) },
+
+    // Multi-line anonymous block: prop [ \n INDENT assertions DEDENT ]
+    <start:@L> "[" NEWLINE INDENT <assertions:FactAssertion+> DEDENT "]" <end:@R>
+    => FactValue::Block { type_hint: None, assertions, span: Some(Span { start, end }) },
+
+    // Qualified name (enum value / concept reference)  — must come last to avoid
+    // eating :name or prefix:name prefixes
+    <start:@L> <name:QualifiedName> <end:@R>
+    => FactValue::Named { name, span: Some(Span { start, end }) },
 };
 
 // ============================================================================

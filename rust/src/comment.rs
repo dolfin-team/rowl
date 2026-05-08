@@ -374,5 +374,10 @@ fn collect_declaration_spans(decl: &Declaration, out: &mut Vec<Span>) {
             }
             // Recurse into match/then blocks...
         }
+        Declaration::Fact(fact_def) => {
+            if let Some(span) = fact_def.span {
+                out.push(span);
+            }
+        }
     }
 }

@@ -43,6 +43,10 @@ pub enum Token {
     Key,
     /// 'a' keyword (type assertion)
     Is,
+    /// 'fact' keyword (instance declaration)
+    Fact,
+    /// 'is' keyword (inverse property assertion in fact blocks)
+    IsInverse,
 
     // Quantifier keywords
     /// 'all' quantifier
@@ -178,6 +182,8 @@ impl std::fmt::Display for Token {
             Token::Has => write!(f, "has"),
             Token::Key => write!(f, "key"),
             Token::Is => write!(f, "a"),
+            Token::Fact => write!(f, "fact"),
+            Token::IsInverse => write!(f, "is"),
             Token::All => write!(f, "all"),
             Token::None => write!(f, "none"),
             Token::AtLeast => write!(f, "at_least"),
@@ -277,6 +283,12 @@ pub enum RawToken {
     /// 'a' keyword (type assertion)
     #[token("a")]
     Is,
+    /// 'fact' keyword (instance declaration)
+    #[token("fact")]
+    Fact,
+    /// 'is' keyword (inverse property assertion in fact blocks)
+    #[token("is")]
+    IsInverse,
 
     // Quantifier keywords
     /// 'all' quantifier
@@ -616,6 +628,8 @@ impl<'input> Lexer<'input> {
             RawToken::Has => Token::Has,
             RawToken::Key => Token::Key,
             RawToken::Is => Token::Is,
+            RawToken::Fact => Token::Fact,
+            RawToken::IsInverse => Token::IsInverse,
             RawToken::All => Token::All,
             RawToken::None => Token::None,
             RawToken::AtLeast => Token::AtLeast,
@@ -805,9 +819,9 @@ impl<'input> Lexer<'input> {
                                 column: start_loc.column,
                             };
                             if self.previous_token_was_comment {
-                              self.comment_sink.push_and_merge(comment);
+                                self.comment_sink.push_and_merge(comment);
                             } else {
-                              self.comment_sink.push(comment);
+                                self.comment_sink.push(comment);
                             }
                             self.previous_token_was_comment = true;
                             // Loop again to find the next real token

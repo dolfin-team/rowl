@@ -32,7 +32,7 @@
 //! ```
 
 // ============================================================================
-// impl_python!: Conditional PyO3 impl blocks
+// impl_python! — Conditional PyO3 impl blocks
 // ============================================================================
 
 /// Define an impl block with conditional PyO3 method attributes.
@@ -119,7 +119,7 @@ macro_rules! impl_python {
 }
 
 // ============================================================================
-// py_only!: Conditionally includes content only when Python feature is active
+// py_only! — Conditionally includes content only when Python feature is active
 // ============================================================================
 
 #[cfg(feature = "python")]

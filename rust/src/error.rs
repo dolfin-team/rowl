@@ -175,21 +175,18 @@ impl PartialOrd for Span {
 #[cfg_attr(feature = "python", pyclass(frozen, get_all, from_py_object))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpannedString {
-  inner: String,
-  pub span: Option<Span>,
+    inner: String,
+    pub span: Option<Span>,
 }
 
 impl SpannedString {
-  pub fn new(inner: String, span: Option<Span>) -> Self {
-    Self {
-      inner,
-      span,
+    pub fn new(inner: String, span: Option<Span>) -> Self {
+        Self { inner, span }
     }
-  }
 
-  pub fn get(&self) -> &String {
-    &self.inner
-  }
+    pub fn get(&self) -> &String {
+        &self.inner
+    }
 }
 
 impl fmt::Display for SpannedString {
@@ -1058,13 +1055,21 @@ fn format_source_context(source: &str, span: &Span) -> Option<String> {
 
 impl From<Location> for dolfin_diagnostic::Location {
     fn from(l: Location) -> Self {
-        dolfin_diagnostic::Location { line: l.line, column: l.column, offset: l.offset }
+        dolfin_diagnostic::Location {
+            line: l.line,
+            column: l.column,
+            offset: l.offset,
+        }
     }
 }
 
 impl From<dolfin_diagnostic::Location> for Location {
     fn from(l: dolfin_diagnostic::Location) -> Self {
-        Location { line: l.line, column: l.column, offset: l.offset }
+        Location {
+            line: l.line,
+            column: l.column,
+            offset: l.offset,
+        }
     }
 }
 

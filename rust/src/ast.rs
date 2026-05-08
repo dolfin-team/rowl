@@ -6,7 +6,10 @@
 use pyo3::prelude::*;
 use std::fmt;
 
-use crate::{error::{Span, SpannedString}, macros::impl_python};
+use crate::{
+    error::{Span, SpannedString},
+    macros::impl_python,
+};
 
 /// A qualified (dot-separated) name in Dolfin.
 #[cfg_attr(feature = "python", pyclass(frozen, get_all, from_py_object))]
@@ -192,6 +195,18 @@ impl OntologyFile {
             })
             .collect()
     }
+
+    #[getter]
+    /// Get all facts
+    pub fn facts(&self) -> Vec<FactDef> {
+        self.declarations
+            .iter()
+            .filter_map(|d| match d {
+                Declaration::Fact(f) => Some(f.clone()),
+                _ => None,
+            })
+            .collect()
+    }
 }
 }
 
@@ -223,6 +238,17 @@ impl OntologyFile {
             .iter()
             .filter_map(|d| match d {
                 Declaration::Rule(r) => Some(r),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Get all facts
+    pub fn facts_as_ref(&self) -> Vec<&FactDef> {
+        self.declarations
+            .iter()
+            .filter_map(|d| match d {
+                Declaration::Fact(f) => Some(f),
                 _ => None,
             })
             .collect()
@@ -330,6 +356,8 @@ pub enum Declaration {
     Property(PropertyDef),
     /// A rule definition
     Rule(RuleDef),
+    /// A fact (instance) definition
+    Fact(FactDef),
 }
 
 impl_python! {
@@ -341,6 +369,7 @@ impl Declaration {
             Declaration::Concept { .. } => "concept",
             Declaration::Property { .. } => "property",
             Declaration::Rule { .. } => "rule",
+            Declaration::Fact { .. } => "fact",
         }
     }
 
@@ -368,11 +397,20 @@ impl Declaration {
         }
     }
 
+    #[getter]
+    fn fact(&self) -> Option<FactDef> {
+        match self {
+            Declaration::Fact(def) => Some(def.clone()),
+            _ => None,
+        }
+    }
+
     fn __repr__(&self) -> String {
         match self {
             Declaration::Concept(def) => format!("Declaration::Concept('{}')", def.name.get()),
             Declaration::Property(def) => format!("Declaration::Property('{}')", def.name.get()),
             Declaration::Rule(def) => format!("Declaration::Rule('{}')", def.name),
+            Declaration::Fact(def) => format!("Declaration::Fact('{}')", def.id),
         }
     }
 
@@ -382,6 +420,7 @@ impl Declaration {
             Declaration::Concept(c) => c.name.get().clone(),
             Declaration::Property(p) => p.name.get().clone(),
             Declaration::Rule(r) => r.name.clone(),
+            Declaration::Fact(f) => f.id.clone(),
         }
     }
 }
@@ -2004,4 +2043,206 @@ impl fmt::Display for PrimitiveKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.__str__())
     }
+}
+
+// ============================================================================
+// FACT (INSTANCE) AST NODES
+// ============================================================================
+
+/// A value in a fact assertion
+#[cfg_attr(feature = "python", pyclass(frozen, from_py_object))]
+#[derive(Debug, Clone, PartialEq)]
+pub enum FactValue {
+    /// Scalar literal (string, int, float, boolean, IRI)
+    Literal { value: Literal, span: Option<Span> },
+    /// Instance reference: `:name` or `prefix:name`
+    Reference { qualifier: Option<String>, name: String, span: Option<Span> },
+    /// Enum member or named concept value (dot-separated name)
+    Named { name: QualifiedName, span: Option<Span> },
+    /// Inline anonymous block `[ ... ]` (blank node)
+    Block { type_hint: Option<QualifiedName>, assertions: Vec<FactAssertion>, span: Option<Span> },
+}
+
+impl_python! {
+#[pymethods]
+impl FactValue {
+    #[getter]
+    fn kind(&self) -> &str {
+        match self {
+            FactValue::Literal { .. } => "literal",
+            FactValue::Reference { .. } => "reference",
+            FactValue::Named { .. } => "named",
+            FactValue::Block { .. } => "block",
+        }
+    }
+
+    #[getter]
+    fn literal(&self) -> Option<Literal> {
+        match self {
+            FactValue::Literal { value, .. } => Some(value.clone()),
+            _ => None,
+        }
+    }
+
+    #[getter]
+    fn qualifier(&self) -> Option<String> {
+        match self {
+            FactValue::Reference { qualifier, .. } => qualifier.clone(),
+            _ => None,
+        }
+    }
+
+    #[getter]
+    fn name(&self) -> Option<String> {
+        match self {
+            FactValue::Reference { name, .. } => Some(name.clone()),
+            FactValue::Named { name, .. } => Some(name.full()),
+            _ => None,
+        }
+    }
+
+    #[getter]
+    fn qualified_name(&self) -> Option<QualifiedName> {
+        match self {
+            FactValue::Named { name, .. } => Some(name.clone()),
+            _ => None,
+        }
+    }
+
+    #[getter]
+    fn type_hint(&self) -> Option<QualifiedName> {
+        match self {
+            FactValue::Block { type_hint, .. } => type_hint.clone(),
+            _ => None,
+        }
+    }
+
+    #[getter]
+    fn assertions(&self) -> Option<Vec<FactAssertion>> {
+        match self {
+            FactValue::Block { assertions, .. } => Some(assertions.clone()),
+            _ => None,
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        match self {
+            FactValue::Literal { value, .. } => format!("FactValue::Literal({:?})", value),
+            FactValue::Reference { qualifier, name, .. } => match qualifier {
+                Some(q) => format!("FactValue::Reference({}:{})", q, name),
+                None => format!("FactValue::Reference(:{})  ", name),
+            },
+            FactValue::Named { name, .. } => format!("FactValue::Named({})", name.full()),
+            FactValue::Block { .. } => "FactValue::Block(...)".to_string(),
+        }
+    }
+}
+}
+
+/// A single assertion in a fact body
+#[cfg_attr(feature = "python", pyclass(frozen, from_py_object))]
+#[derive(Debug, Clone, PartialEq)]
+pub enum FactAssertion {
+    /// `property_name value, ...`
+    Property { name: String, values: Vec<FactValue>, span: Option<Span> },
+    /// `is property of value`  (inverse property form)
+    Inverse { property: QualifiedName, value: FactValue, span: Option<Span> },
+    /// `a ConceptName`  (type hint inside anonymous block)
+    TypeHint { type_ref: QualifiedName, span: Option<Span> },
+}
+
+impl_python! {
+#[pymethods]
+impl FactAssertion {
+    #[getter]
+    fn kind(&self) -> &str {
+        match self {
+            FactAssertion::Property { .. } => "property",
+            FactAssertion::Inverse { .. } => "inverse",
+            FactAssertion::TypeHint { .. } => "type_hint",
+        }
+    }
+
+    #[getter]
+    fn name(&self) -> Option<String> {
+        match self {
+            FactAssertion::Property { name, .. } => Some(name.clone()),
+            _ => None,
+        }
+    }
+
+    #[getter]
+    fn values(&self) -> Option<Vec<FactValue>> {
+        match self {
+            FactAssertion::Property { values, .. } => Some(values.clone()),
+            _ => None,
+        }
+    }
+
+    #[getter]
+    fn property(&self) -> Option<QualifiedName> {
+        match self {
+            FactAssertion::Inverse { property, .. } => Some(property.clone()),
+            _ => None,
+        }
+    }
+
+    #[getter]
+    fn value(&self) -> Option<FactValue> {
+        match self {
+            FactAssertion::Inverse { value, .. } => Some(value.clone()),
+            _ => None,
+        }
+    }
+
+    #[getter]
+    fn type_ref(&self) -> Option<QualifiedName> {
+        match self {
+            FactAssertion::TypeHint { type_ref, .. } => Some(type_ref.clone()),
+            _ => None,
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        match self {
+            FactAssertion::Property { name, values, .. } => {
+                format!("FactAssertion::Property({}, {} value(s))", name, values.len())
+            }
+            FactAssertion::Inverse { property, .. } => {
+                format!("FactAssertion::Inverse({})", property.full())
+            }
+            FactAssertion::TypeHint { type_ref, .. } => {
+                format!("FactAssertion::TypeHint({})", type_ref.full())
+            }
+        }
+    }
+}
+}
+
+/// A fact (instance) definition
+#[cfg_attr(feature = "python", pyclass(frozen, get_all, from_py_object))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct FactDef {
+    /// The instance identifier
+    pub id: String,
+    /// The concept(s) this instance is a member of
+    pub types: Vec<QualifiedName>,
+    /// Property assertions and inverse assertions
+    pub assertions: Vec<FactAssertion>,
+    pub span: Option<Span>,
+}
+
+impl_python! {
+#[pymethods]
+impl FactDef {
+    #[new]
+    #[pyo3(signature = (id, types, assertions, span=None))]
+    pub fn new(id: String, types: Vec<QualifiedName>, assertions: Vec<FactAssertion>, span: Option<Span>) -> Self {
+        Self { id, types, assertions, span }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("FactDef('{}', types={}, assertions={})", self.id, self.types.len(), self.assertions.len())
+    }
+}
 }

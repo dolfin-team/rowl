@@ -39,7 +39,10 @@ pub fn resolve_package(
         }
 
         namespace_index.insert(full_namespace.clone(), discovered.absolute_path.clone());
-        by_relative_path.insert(discovered.relative_path.clone(), (discovered, parsed, comment_map));
+        by_relative_path.insert(
+            discovered.relative_path.clone(),
+            (discovered, parsed, comment_map),
+        );
     }
     info!("Found namespace_index: {:?}", namespace_index);
     info!("Found by_relative_path: {:?}", by_relative_path);

@@ -570,7 +570,7 @@ rule EmployeeAccess:
         assert!(matches!(first, crate::Pattern::Type { .. }));
     }
 
-        #[test]
+    #[test]
     fn test_parse_two_rule() {
         let source = r#"
 rule flag_unvaccinated:
@@ -610,7 +610,7 @@ rule flag_intern_emergency:
             .first()
             .expect("Match block must have a first pattern");
         assert!(matches!(first, crate::Pattern::Type { .. }));
-      }
+    }
 
     #[test]
     fn test_parse_with_comments() {
@@ -730,5 +730,101 @@ property worksFor: Employee -> Organization
         assert!(result.ontology.is_none());
         assert!(result.has_errors());
         assert!(!result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_fact_simple() {
+        let source = "fact rex a Dog\n  name \"Rex\"\n  weight 45.0\n";
+        let result = parse_ontology(source);
+        assert!(result.is_ok(), "Parse error: {:?}", result.errors());
+        let onto = result.ontology.unwrap();
+        assert_eq!(onto.facts().len(), 1);
+        let fact = &onto.facts()[0];
+        assert_eq!(fact.id, "rex");
+        assert_eq!(fact.types.len(), 1);
+        assert_eq!(fact.types[0].full(), "Dog");
+        assert_eq!(fact.assertions.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_fact_multiple_types() {
+        let source = "fact felix a Cat, NeverVaccinated\n";
+        let result = parse_ontology(source);
+        assert!(result.is_ok(), "Parse error: {:?}", result.errors());
+        let onto = result.ontology.unwrap();
+        let fact = &onto.facts()[0];
+        assert_eq!(fact.types.len(), 2);
+        assert_eq!(fact.types[0].full(), "Cat");
+        assert_eq!(fact.types[1].full(), "NeverVaccinated");
+    }
+
+    #[test]
+    fn test_parse_fact_with_reference() {
+        let source = "fact rex a Dog\n  owner :John\n";
+        let result = parse_ontology(source);
+        assert!(result.is_ok(), "Parse error: {:?}", result.errors());
+        let onto = result.ontology.unwrap();
+        let fact = &onto.facts()[0];
+        assert_eq!(fact.assertions.len(), 1);
+        match &fact.assertions[0] {
+            crate::ast::FactAssertion::Property { name, values, .. } => {
+                assert_eq!(name, "owner");
+                assert_eq!(values.len(), 1);
+                match &values[0] {
+                    crate::ast::FactValue::Reference { qualifier, name, .. } => {
+                        assert!(qualifier.is_none());
+                        assert_eq!(name, "John");
+                    }
+                    _ => panic!("Expected Reference"),
+                }
+            }
+            _ => panic!("Expected Property assertion"),
+        }
+    }
+
+    #[test]
+    fn test_parse_fact_anonymous_block() {
+        let source = "fact rex a Dog\n  vaccination [\n    vaccine_name \"Davies\"\n    date_administered \"2024-04-23\"\n  ]\n";
+        let result = parse_ontology(source);
+        assert!(result.is_ok(), "Parse error: {:?}", result.errors());
+        let onto = result.ontology.unwrap();
+        let fact = &onto.facts()[0];
+        match &fact.assertions[0] {
+            crate::ast::FactAssertion::Property { name, values, .. } => {
+                assert_eq!(name, "vaccination");
+                assert_eq!(values.len(), 1);
+                match &values[0] {
+                    crate::ast::FactValue::Block { assertions, .. } => {
+                        assert_eq!(assertions.len(), 2);
+                    }
+                    _ => panic!("Expected Block"),
+                }
+            }
+            _ => panic!("Expected Property assertion"),
+        }
+    }
+
+    #[test]
+    fn test_parse_full_fact_example() {
+        let source = "fact rex a Dog\n  name \"Rex\"\n  weight 45.0\n  neutered true\n  owner :John\n  vaccinations [\n    vaccine_name \"Davies\"\n    date_administered \"2024-04-23\"\n  ]\n\nfact felix a Cat\n  name \"Felix\"\n  weight 5.2\n  indoor true\n  owner :John\n\nfact John a Owner\n  first_name \"John\"\n  last_name \"Smith\"\n  phone_numbers \"555-1234\"\n  preferred_vet :DrPortbridge\n";
+        let result = parse_ontology(source);
+        assert!(result.is_ok(), "Errors: {:?}", result.errors());
+        let onto = result.ontology.unwrap();
+        assert_eq!(onto.facts().len(), 3);
+    }
+
+    #[test]
+    fn test_parse_fact_inverse() {
+        let source = "fact john a Person\n  is spouse of :mary\n";
+        let result = parse_ontology(source);
+        assert!(result.is_ok(), "Parse error: {:?}", result.errors());
+        let onto = result.ontology.unwrap();
+        let fact = &onto.facts()[0];
+        match &fact.assertions[0] {
+            crate::ast::FactAssertion::Inverse { property, .. } => {
+                assert_eq!(property.full(), "spouse");
+            }
+            _ => panic!("Expected Inverse assertion"),
+        }
     }
 }
