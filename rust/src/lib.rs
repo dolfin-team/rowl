@@ -59,10 +59,6 @@ pub use parser::{
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 
-use crate::{
-    error::{DolfinParseError, ParseResult},
-    parser::parse_result_strict,
-};
 
 /// Parse Dolfin source code from a string.
 ///

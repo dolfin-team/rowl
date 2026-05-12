@@ -699,17 +699,15 @@ impl<'input> Lexer<'input> {
                         if stack.is_empty() {
                             new_pending_tokens.push_back((start, Token::Newline, end));
                             new_pending_tokens.push_back((nstart, Token::Dedent, nend));
-                        } else {
-                            if let Some(last) = stack.pop_back() {
-                                let mut new = start;
-                                while new_pending_tokens.len() > last {
-                                    if let Some((update_new, _, _)) = new_pending_tokens.pop_back()
-                                    {
-                                        new = update_new;
-                                    }
+                        } else if let Some(last) = stack.pop_back() {
+                            let mut new = start;
+                            while new_pending_tokens.len() > last {
+                                if let Some((update_new, _, _)) = new_pending_tokens.pop_back()
+                                {
+                                    new = update_new;
                                 }
-                                self.pending_tokens.push_front((new, Token::Newline, nend));
                             }
+                            self.pending_tokens.push_front((new, Token::Newline, nend));
                         }
                     }
                     Some(value) => {
@@ -767,9 +765,7 @@ impl<'input> Lexer<'input> {
             .collect();
         self.compact_pending_tokens();
         peek_pending_tokens
-            .iter()
-            .cloned()
-            .filter(|t| *t != Token::Newline && *t != Token::Indent && *t != Token::Dedent)
+            .iter().filter(|&t| *t != Token::Newline && *t != Token::Indent && *t != Token::Dedent)
             .count()
             != 0
     }
@@ -781,11 +777,10 @@ impl<'input> Lexer<'input> {
         }
 
         // Return pending tokens first
-        if self.should_emit_tokens() {
-            if let Some(tok) = self.pending_tokens.pop_front() {
+        if self.should_emit_tokens()
+            && let Some(tok) = self.pending_tokens.pop_front() {
                 return Some(Ok(tok));
             }
-        }
 
         if self.finished {
             return None;

@@ -76,7 +76,7 @@ fn parse_annotation_text(text: &str) -> ParsedAnnotation {
         let args = parse_args(args_text);
         ParsedAnnotation { name, args }
     } else if let Some(paren_pos) = text.find('\n') {
-      let name = text[..paren_pos].trim().to_string();
+        let name = text[..paren_pos].trim().to_string();
         let args_text = text[paren_pos + 1..].trim_end_matches('\n').trim();
         let args = parse_args(args_text);
         ParsedAnnotation { name, args }
