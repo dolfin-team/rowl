@@ -17,6 +17,9 @@ use crate::{
 pub struct QualifiedName {
     /// The individual components of the qualified name (e.g., ["com", "example", "Person"])
     pub parts: Vec<String>,
+    /// True when parsed from `alias:Local` syntax (PREFIXED_NAME token), false for dot-separated.
+    /// This distinguishes `ex:Animal` (prefix alias expansion) from `ex.Animal` (namespace path).
+    pub is_prefixed: bool,
     /// Source code span for this declaration
     pub span: Option<Span>,
 }
@@ -27,12 +30,18 @@ impl QualifiedName {
     #[new]
     #[pyo3(signature = (parts, span=None))]
     pub fn new(parts: Vec<String>, span: Option<Span>) -> Self {
-        Self { parts, span }
+        Self { parts, is_prefixed: false, span }
+    }
+
+    /// Create a prefixed-name reference (from `alias:Local` syntax).
+    #[staticmethod]
+    pub fn new_prefixed(alias: String, local: String, span: Option<Span>) -> Self {
+        Self { parts: vec![alias, local], is_prefixed: true, span }
     }
 
     #[staticmethod]
     pub fn from_single(name: String) -> Self {
-        Self { parts: vec![name], span: None }
+        Self { parts: vec![name], is_prefixed: false, span: None }
     }
 
     /// Get the prefix (all parts except the last)
@@ -68,16 +77,16 @@ impl QualifiedName {
         let mut parts = self.parts.clone();
         parts.extend(other.parts.iter().cloned());
         if let Some(ss) = &self.span && let Some(os) = &other.span {
-            QualifiedName { parts, span: Some(ss.merge(os)) }
+            QualifiedName { parts, is_prefixed: false, span: Some(ss.merge(os)) }
         } else {
-            QualifiedName { parts, span: None }
+            QualifiedName { parts, is_prefixed: false, span: None }
         }
     }
 
     /// Remove last part and give a QualifiedName
     pub fn prefix_as_qn(&self) -> Option<QualifiedName> {
       if self.parts.len() > 1 {
-        Some(QualifiedName { parts: self.parts[self.parts.len() - 1..].to_vec(), span: None })
+        Some(QualifiedName { parts: self.parts[self.parts.len() - 1..].to_vec(), is_prefixed: false, span: None })
       } else {
         None
       }
@@ -112,7 +121,7 @@ impl QualifiedName {
     } else {
       self.parts.clone()
     };
-    QualifiedName { parts, span: None }
+    QualifiedName { parts, is_prefixed: false, span: None }
   }
 }
 
@@ -123,16 +132,66 @@ impl fmt::Display for QualifiedName {
 }
 
 
+/// Value of an `@iri_name` annotation — distinguishes how to resolve the name.
+#[derive(Debug, Clone, PartialEq)]
+pub enum IriNameValue {
+    /// Absolute IRI from `<...>` syntax — used verbatim, not appended to base IRI
+    AbsoluteUri(String),
+    /// Local segment from `"..."` syntax — appended to the namespace base path
+    LocalSegment(String),
+}
+
+impl IriNameValue {
+    pub fn as_str(&self) -> &str {
+        match self {
+            IriNameValue::AbsoluteUri(s) | IriNameValue::LocalSegment(s) => s.as_str(),
+        }
+    }
+}
+
+#[cfg(feature = "python")]
+impl<'a, 'py> pyo3::FromPyObject<'a, 'py> for IriNameValue {
+    type Error = pyo3::PyErr;
+    fn extract(ob: pyo3::Borrowed<'a, 'py, pyo3::PyAny>) -> Result<Self, Self::Error> {
+        let s: String = ob.extract()?;
+        Ok(IriNameValue::LocalSegment(s))
+    }
+}
+
+#[cfg(feature = "python")]
+impl<'py> pyo3::IntoPyObject<'py> for IriNameValue {
+    type Target = pyo3::types::PyString;
+    type Output = pyo3::Bound<'py, pyo3::types::PyString>;
+    type Error = std::convert::Infallible;
+    fn into_pyobject(self, py: pyo3::Python<'py>) -> Result<Self::Output, Self::Error> {
+        Ok(pyo3::types::PyString::new(py, self.as_str()))
+    }
+}
+
+#[cfg(feature = "python")]
+impl<'py> pyo3::IntoPyObject<'py> for &IriNameValue {
+    type Target = pyo3::types::PyString;
+    type Output = pyo3::Bound<'py, pyo3::types::PyString>;
+    type Error = std::convert::Infallible;
+    fn into_pyobject(self, py: pyo3::Python<'py>) -> Result<Self::Output, Self::Error> {
+        Ok(pyo3::types::PyString::new(py, self.as_str()))
+    }
+}
+
 /// An ontology file (new top-level structure)
 #[cfg_attr(feature = "python", pyclass(frozen, get_all, from_py_object))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct OntologyFile {
     /// Optional IRI name override from @iri_name annotation
-    pub iri_name: Option<String>,
+    pub iri_name: Option<IriNameValue>,
     /// Prefix declarations
     pub prefixes: Vec<PrefixDecl>,
     /// Declarations (concepts, properties, enums, rules)
     pub declarations: Vec<Declaration>,
+    /// Raw `@locale <arg>` directive argument (e.g. `"d/m/y"`), if present.
+    pub locale: Option<String>,
+    /// Raw `@timezone <arg>` directive argument (e.g. `"Europe/Brussels"`).
+    pub timezone: Option<String>,
     pub span: Option<Span>,
 }
 
@@ -148,13 +207,32 @@ impl OntologyFile {
         declarations: Vec<Declaration>,
         span: Option<Span>,
     ) -> Self {
-        Self { iri_name, prefixes, declarations, span }
+        Self {
+            iri_name: iri_name.map(IriNameValue::LocalSegment),
+            prefixes,
+            declarations,
+            locale: None,
+            timezone: None,
+            span,
+        }
+    }
+
+    /// The raw `@locale` directive argument, if the file declared one.
+    #[getter]
+    fn locale_directive(&self) -> Option<String> {
+        self.locale.clone()
+    }
+
+    /// The raw `@timezone` directive argument, if the file declared one.
+    #[getter]
+    fn timezone_directive(&self) -> Option<String> {
+        self.timezone.clone()
     }
 
     fn __repr__(&self) -> String {
         format!(
             "OntologyFile(iri_name={:?}, prefixes={}, declarations={})",
-            self.iri_name,
+            self.iri_name.as_ref().map(|v| v.as_str()),
             self.prefixes.len(),
             self.declarations.len()
         )
@@ -207,6 +285,18 @@ impl OntologyFile {
             })
             .collect()
     }
+
+    #[getter]
+    /// Get all queries
+    pub fn queries(&self) -> Vec<QueryDef> {
+        self.declarations
+            .iter()
+            .filter_map(|d| match d {
+                Declaration::Query(q) => Some(q.clone()),
+                _ => None,
+            })
+            .collect()
+    }
 }
 }
 
@@ -249,6 +339,17 @@ impl OntologyFile {
             .iter()
             .filter_map(|d| match d {
                 Declaration::Fact(f) => Some(f),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Get all queries
+    pub fn queries_as_ref(&self) -> Vec<&QueryDef> {
+        self.declarations
+            .iter()
+            .filter_map(|d| match d {
+                Declaration::Query(q) => Some(q),
                 _ => None,
             })
             .collect()
@@ -358,6 +459,10 @@ pub enum Declaration {
     Rule(RuleDef),
     /// A fact (instance) definition
     Fact(FactDef),
+    /// A query definition
+    Query(QueryDef),
+    /// A unit declaration (`unitdef EUR: scale 1.0`, `unitdef family vegetables`, ...)
+    Unit(UnitDef),
 }
 
 impl_python! {
@@ -370,6 +475,8 @@ impl Declaration {
             Declaration::Property { .. } => "property",
             Declaration::Rule { .. } => "rule",
             Declaration::Fact { .. } => "fact",
+            Declaration::Query { .. } => "query",
+            Declaration::Unit { .. } => "unit",
         }
     }
 
@@ -411,6 +518,8 @@ impl Declaration {
             Declaration::Property(def) => format!("Declaration::Property('{}')", def.name.get()),
             Declaration::Rule(def) => format!("Declaration::Rule('{}')", def.name),
             Declaration::Fact(def) => format!("Declaration::Fact('{}')", def.id),
+            Declaration::Query(def) => format!("Declaration::Query('{}')", def.name),
+            Declaration::Unit(def) => format!("Declaration::Unit('{}')", def.name.get()),
         }
     }
 
@@ -421,7 +530,71 @@ impl Declaration {
             Declaration::Property(p) => p.name.get().clone(),
             Declaration::Rule(r) => r.name.clone(),
             Declaration::Fact(f) => f.id.clone(),
+            Declaration::Query(q) => q.name.clone(),
+            Declaration::Unit(u) => u.name.get().clone(),
         }
+    }
+
+    #[getter]
+    fn query(&self) -> Option<QueryDef> {
+        match self {
+            Declaration::Query(def) => Some(def.clone()),
+            _ => None,
+        }
+    }
+}
+}
+
+/// A unit declaration (`unitdef EUR: scale 1.0`, `unitdef family vegetables`, ...).
+///
+/// See `dolfin-units::registry::UnitRegistry` for how these feed the
+/// project-scoped unit registry, and TODO.md's "currency / custom units"
+/// entry for the overall design (currency units are ordinary derived units on
+/// a new `Dimensions.currency` axis; nominal units are dimensionless but
+/// incommensurable outside an explicit `as <family>` widening cast).
+#[cfg_attr(feature = "python", pyclass(frozen, get_all, from_py_object))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnitDef {
+    /// The unit (or family) name.
+    pub name: SpannedString,
+    /// What kind of unit declaration this is.
+    pub kind: UnitKind,
+    /// Source code span for this definition.
+    pub span: Option<Span>,
+}
+
+/// The right-hand side of a `unit` declaration.
+#[cfg_attr(feature = "python", pyclass(frozen, from_py_object))]
+#[derive(Debug, Clone, PartialEq)]
+pub enum UnitKind {
+    /// `unitdef family <name>` — declares an abstract, dimensionless family that
+    /// nominal units can belong to (e.g. `vegetables`). Not itself a usable
+    /// unit in a `quantity(...)` literal.
+    Family(),
+    /// `unit <name>: nominal of <family> scale <factor>` — an incommensurable
+    /// unit belonging to `family`, convertible into the family's base scale
+    /// only via an explicit `as <family>` widening cast (never via plain `+`
+    /// with a different unit of the same family, and never via `*`/`/`).
+    Nominal { family: QualifiedName, scale: f64 },
+    /// `unit <name>: scale <factor> <reference>` — an ordinary derived unit,
+    /// same mechanism as declaring `km` from `m`: dimensions and further
+    /// scale are inherited from `reference` (which must already resolve,
+    /// builtin or previously declared). This is how a project adds a
+    /// currency (e.g. `unit USD: scale 0.92 EUR`) or any other derived unit.
+    Derived { scale: f64, reference: String },
+}
+
+impl_python! {
+#[pymethods]
+impl UnitDef {
+    #[new]
+    #[pyo3(signature = (name, kind, span, name_span=None))]
+    pub fn new(name: String, kind: UnitKind, span: Option<Span>, name_span: Option<Span>) -> Self {
+        Self { name: SpannedString::new(name, name_span), kind, span }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("UnitDef('{}')", self.name.get())
     }
 }
 }
@@ -438,6 +611,8 @@ pub struct ConceptDef {
     pub has_declarations: Vec<HasDeclaration>,
     /// Named individuals declared with 'one of:' (closed-world enumeration)
     pub one_of: Option<Vec<OneOfVariant>>,
+    /// Optional IRI override from @iri_name annotation inside the concept body
+    pub iri_name: Option<IriNameValue>,
     /// Source code span for this definition
     pub span: Option<Span>,
 }
@@ -448,7 +623,7 @@ impl ConceptDef {
     #[new]
     #[pyo3(signature = (name, parents, has_declarations, one_of, span, name_span=None))]
     pub fn new(name: String, parents: Vec<TypeRef>, has_declarations: Vec<HasDeclaration>, one_of: Option<Vec<OneOfVariant>>, span: Option<Span>, name_span: Option<Span>) -> Self {
-        Self { name: SpannedString::new(name, name_span), parents, has_declarations, one_of, span }
+        Self { name: SpannedString::new(name, name_span), parents, has_declarations, one_of, iri_name: None, span }
     }
 
     fn __repr__(&self) -> String {
@@ -473,6 +648,7 @@ impl ConceptDef {
             parents,
             has_declarations,
             one_of: None,
+            iri_name: None,
             span: None,
         }
     }
@@ -494,6 +670,8 @@ pub enum ConceptMember {
     Has(HasDeclaration),
     /// Closed-world named individuals ('one of:' block)
     OneOf(Vec<OneOfVariant>),
+    /// IRI override for this specific concept
+    IriName(IriNameValue),
 }
 
 impl_python! {
@@ -505,6 +683,7 @@ impl ConceptMember {
             ConceptMember::Sub(..) => "sub",
             ConceptMember::Has(..) => "has",
             ConceptMember::OneOf(..) => "one_of",
+            ConceptMember::IriName(..) => "iri_name",
         }
     }
 
@@ -531,10 +710,148 @@ impl ConceptMember {
             }
             ConceptMember::Has(decl) => format!("ConceptMember::Has('{}')", decl.name),
             ConceptMember::OneOf(variants) => format!("ConceptMember::OneOf(count={})", variants.len()),
+            ConceptMember::IriName(iri) => format!("ConceptMember::IriName('{}')", iri.as_str()),
         }
     }
 }
 }
+/// OWL property path expression (used in `equivalent to` axioms)
+#[cfg_attr(feature = "python", pyclass(frozen, from_py_object))]
+#[derive(Debug, Clone, PartialEq)]
+pub enum PropertyPath {
+    /// Bare property name
+    Name { name: QualifiedName, span: Option<Span> },
+    /// Inverse: ^p
+    Inverse { inner: Box<PropertyPath>, span: Option<Span> },
+    /// Sequence: p / q  (property chain)
+    Sequence { steps: Vec<PropertyPath>, span: Option<Span> },
+    /// Alternative: p | q
+    Alt { left: Box<PropertyPath>, right: Box<PropertyPath>, span: Option<Span> },
+    /// One-or-more: p+
+    OneOrMore { inner: Box<PropertyPath>, span: Option<Span> },
+    /// Zero-or-more: p*
+    ZeroOrMore { inner: Box<PropertyPath>, span: Option<Span> },
+}
+
+impl_python! {
+#[pymethods]
+impl PropertyPath {
+    #[getter]
+    fn kind(&self) -> &str {
+        match self {
+            PropertyPath::Name { .. } => "name",
+            PropertyPath::Inverse { .. } => "inverse",
+            PropertyPath::Sequence { .. } => "sequence",
+            PropertyPath::Alt { .. } => "alt",
+            PropertyPath::OneOrMore { .. } => "one_or_more",
+            PropertyPath::ZeroOrMore { .. } => "zero_or_more",
+        }
+    }
+
+    #[getter]
+    fn name(&self) -> Option<QualifiedName> {
+        match self {
+            PropertyPath::Name { name, .. } => Some(name.clone()),
+            _ => None,
+        }
+    }
+
+    #[getter]
+    fn steps(&self) -> Option<Vec<PropertyPath>> {
+        match self {
+            PropertyPath::Sequence { steps, .. } => Some(steps.clone()),
+            _ => None,
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        match self {
+            PropertyPath::Name { name, .. } => format!("PropertyPath::Name({})", name),
+            PropertyPath::Inverse { inner, .. } => format!("PropertyPath::Inverse({:?})", inner),
+            PropertyPath::Sequence { steps, .. } => format!("PropertyPath::Sequence(len={})", steps.len()),
+            PropertyPath::Alt { left, right, .. } => format!("PropertyPath::Alt({:?} | {:?})", left, right),
+            PropertyPath::OneOrMore { inner, .. } => format!("PropertyPath::OneOrMore({:?})", inner),
+            PropertyPath::ZeroOrMore { inner, .. } => format!("PropertyPath::ZeroOrMore({:?})", inner),
+        }
+    }
+}
+}
+
+py_only! {
+    impl<'py> pyo3::IntoPyObject<'py> for Box<PropertyPath> {
+        type Target = PropertyPath;
+        type Output = pyo3::Bound<'py, PropertyPath>;
+        type Error = pyo3::PyErr;
+
+        fn into_pyobject(self, py: pyo3::Python<'py>) -> Result<Self::Output, Self::Error> {
+            (*self).into_pyobject(py)
+        }
+    }
+
+    impl<'a, 'py> pyo3::FromPyObject<'a, 'py> for Box<PropertyPath> {
+        type Error = pyo3::PyErr;
+        fn extract(ob: pyo3::Borrowed<'a, 'py, pyo3::PyAny>) -> Result<Self, Self::Error> {
+            ob.extract::<PropertyPath>().map(Box::new).map_err(Into::into)
+        }
+    }
+}
+
+/// Characteristic of a property (used in property definitions and has-declarations)
+#[cfg_attr(feature = "python", pyclass(frozen, from_py_object))]
+#[derive(Debug, Clone, PartialEq)]
+pub enum PropertyAxiom {
+    Sub { property: QualifiedName, span: Option<Span> },
+    InverseOf { property: QualifiedName, span: Option<Span> },
+    Transitive { span: Option<Span> },
+    Symmetric { span: Option<Span> },
+    Reflexive { span: Option<Span> },
+    EquivalentTo { path: PropertyPath, span: Option<Span> },
+}
+
+impl_python! {
+#[pymethods]
+impl PropertyAxiom {
+    #[getter]
+    fn kind(&self) -> &str {
+        match self {
+            PropertyAxiom::Sub { .. } => "sub",
+            PropertyAxiom::InverseOf { .. } => "inverse_of",
+            PropertyAxiom::Transitive { .. } => "transitive",
+            PropertyAxiom::Symmetric { .. } => "symmetric",
+            PropertyAxiom::Reflexive { .. } => "reflexive",
+            PropertyAxiom::EquivalentTo { .. } => "equivalent_to",
+        }
+    }
+
+    #[getter]
+    fn property(&self) -> Option<QualifiedName> {
+        match self {
+            PropertyAxiom::Sub { property, .. } | PropertyAxiom::InverseOf { property, .. } => Some(property.clone()),
+            _ => None,
+        }
+    }
+
+    #[getter]
+    fn path(&self) -> Option<PropertyPath> {
+        match self {
+            PropertyAxiom::EquivalentTo { path, .. } => Some(path.clone()),
+            _ => None,
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        match self {
+            PropertyAxiom::Sub { property, .. } => format!("PropertyAxiom::Sub({})", property),
+            PropertyAxiom::InverseOf { property, .. } => format!("PropertyAxiom::InverseOf({})", property),
+            PropertyAxiom::Transitive { .. } => "PropertyAxiom::Transitive".to_string(),
+            PropertyAxiom::Symmetric { .. } => "PropertyAxiom::Symmetric".to_string(),
+            PropertyAxiom::Reflexive { .. } => "PropertyAxiom::Reflexive".to_string(),
+            PropertyAxiom::EquivalentTo { path, .. } => format!("PropertyAxiom::EquivalentTo({:?})", path),
+        }
+    }
+}
+}
+
 /// Has declaration (property on a concept)
 #[cfg_attr(feature = "python", pyclass(frozen, get_all, from_py_object))]
 #[derive(Debug, Clone, PartialEq)]
@@ -547,6 +864,8 @@ pub struct HasDeclaration {
     pub cardinality: Option<Cardinality>,
     /// The type reference for this property
     pub type_ref: TypeRef,
+    /// Property axioms (inverse of, sub, etc.)
+    pub axioms: Vec<PropertyAxiom>,
     /// Source code span for this declaration
     pub span: Option<Span>,
 }
@@ -561,13 +880,14 @@ impl HasDeclaration {
     ///     type_ref: The type reference
     ///     cardinality: Optional cardinality constraint (default: None)
     #[new]
-    #[pyo3(signature = (name, type_ref, cardinality=None, is_key=false, span=None))]
-    pub fn new(name: String, type_ref: TypeRef, cardinality: Option<&Cardinality>, is_key: bool, span: Option<Span>) -> Self {
+    #[pyo3(signature = (name, type_ref, cardinality=None, is_key=false, axioms=vec![], span=None))]
+    pub fn new(name: String, type_ref: TypeRef, cardinality: Option<&Cardinality>, is_key: bool, axioms: Vec<PropertyAxiom>, span: Option<Span>) -> Self {
         Self {
             name,
             is_key,
             cardinality: cardinality.cloned(),
             type_ref,
+            axioms,
             span,
         }
     }
@@ -596,6 +916,8 @@ pub struct PropertyDef {
     pub range_cardinality: Option<Cardinality>,
     /// The range type (object type)
     pub range: TypeRef,
+    /// Property axioms (sub, inverse of, symmetric, etc.)
+    pub axioms: Vec<PropertyAxiom>,
     pub span: Option<Span>,
 }
 
@@ -611,13 +933,14 @@ impl PropertyDef {
     ///     domain_cardinality: Optional domain cardinality (default: None)
     ///     range_cardinality: Optional range cardinality (default: None)
     #[new]
-    #[pyo3(signature = (name, domain, range, domain_cardinality=None, range_cardinality=None, span=None, name_span=None))]
+    #[pyo3(signature = (name, domain, range, domain_cardinality=None, range_cardinality=None, axioms=vec![], span=None, name_span=None))]
     pub fn new(
         name: String,
         domain: TypeRef,
         range: TypeRef,
         domain_cardinality: Option<&Cardinality>,
         range_cardinality: Option<&Cardinality>,
+        axioms: Vec<PropertyAxiom>,
         span: Option<Span>,
         name_span: Option<Span>,
     ) -> Self {
@@ -627,6 +950,7 @@ impl PropertyDef {
             domain,
             range_cardinality: range_cardinality.cloned(),
             range,
+            axioms,
             span,
         }
     }
@@ -662,6 +986,494 @@ impl OneOfVariant {
 
     fn __repr__(&self) -> String {
         format!("OneOfVariant('{}')", self.name)
+    }
+}
+}
+
+/// Query definition
+#[cfg_attr(feature = "python", pyclass(frozen, get_all, from_py_object))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueryDef {
+    /// The query name
+    pub name: String,
+    /// The query body (clauses, optional group-by, optional return block)
+    pub body: QueryBody,
+    pub span: Option<Span>,
+    /// Span of just the name token (for rename support)
+    pub name_span: Option<Span>,
+}
+
+impl_python! {
+#[pymethods]
+impl QueryDef {
+    #[new]
+    pub fn new(name: String, body: QueryBody, span: Option<Span>) -> Self {
+        Self { name, body, span, name_span: None }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("QueryDef('{}')", self.name)
+    }
+}
+}
+
+/// Body of a query definition
+#[cfg_attr(feature = "python", pyclass(frozen, get_all, from_py_object))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueryBody {
+    pub clauses: Vec<QueryClause>,
+    pub group_by: Option<GroupByBlock>,
+    pub return_block: Option<ReturnBlock>,
+    pub span: Option<Span>,
+}
+
+impl_python! {
+#[pymethods]
+impl QueryBody {
+    #[new]
+    pub fn new(clauses: Vec<QueryClause>, group_by: Option<GroupByBlock>, return_block: Option<ReturnBlock>, span: Option<Span>) -> Self {
+        Self { clauses, group_by, return_block, span }
+    }
+    fn __repr__(&self) -> String {
+        format!("QueryBody(clauses={})", self.clauses.len())
+    }
+}
+}
+
+/// A top-level clause inside a query body
+#[cfg_attr(feature = "python", pyclass(frozen, from_py_object))]
+#[derive(Debug, Clone, PartialEq)]
+pub enum QueryClause {
+    SubjectPattern(SubjectPattern),
+    Composition(QueryComposition),
+    ExistenceBlock(ExistenceBlock),
+    InverseTriple(InverseTriple),
+    BooleanFilter(BoolExpr),
+    AggregationQuery(AggregationQuery),
+}
+
+impl_python! {
+#[pymethods]
+impl QueryClause {
+    #[getter]
+    fn kind(&self) -> &str {
+        match self {
+            QueryClause::SubjectPattern(_) => "subject_pattern",
+            QueryClause::Composition(_) => "composition",
+            QueryClause::ExistenceBlock(_) => "existence_block",
+            QueryClause::InverseTriple(_) => "inverse_triple",
+            QueryClause::BooleanFilter(_) => "boolean_filter",
+            QueryClause::AggregationQuery(_) => "aggregation_query",
+        }
+    }
+    fn __repr__(&self) -> String {
+        format!("QueryClause::{}", self.kind())
+    }
+}
+}
+
+/// A top-level inverse triple inside a query body: `is prop of ?var`
+#[cfg_attr(feature = "python", pyclass(frozen, get_all, from_py_object))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct InverseTriple {
+    pub property: QualifiedName,
+    pub object: Object,
+    pub span: Option<Span>,
+}
+
+impl_python! {
+#[pymethods]
+impl InverseTriple {
+    #[new]
+    pub fn new(property: QualifiedName, object: Object, span: Option<Span>) -> Self {
+        Self { property, object, span }
+    }
+    fn __repr__(&self) -> String {
+        format!("InverseTriple({})", self.property)
+    }
+}
+}
+
+/// A subject-scoped pattern: `?var a Type { ... }`, `a Type { ... }` (anonymous), or `?var { ... }` (untyped)
+#[cfg_attr(feature = "python", pyclass(frozen, get_all, from_py_object))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubjectPattern {
+    pub subject: Option<String>,
+    pub type_ref: Option<TypeRef>,
+    pub properties: Vec<PropertyPattern>,
+    pub span: Option<Span>,
+}
+
+impl_python! {
+#[pymethods]
+impl SubjectPattern {
+    #[new]
+    pub fn new(subject: Option<String>, type_ref: Option<TypeRef>, properties: Vec<PropertyPattern>, span: Option<Span>) -> Self {
+        Self { subject, type_ref, properties, span }
+    }
+    fn __repr__(&self) -> String {
+        format!("SubjectPattern({:?})", self.subject)
+    }
+}
+}
+
+/// A property-level pattern inside a subject block
+#[cfg_attr(feature = "python", pyclass(frozen, from_py_object))]
+#[derive(Debug, Clone, PartialEq)]
+pub enum PropertyPattern {
+    Value        { property: QualifiedName, object: Object, span: Option<Span> },
+    Constrained  { property: QualifiedName, block: ConstraintBlock, span: Option<Span> },
+    Optional     { property: QualifiedName, object: Object, span: Option<Span> },
+    Inverse        { property: QualifiedName, outer_var: String, span: Option<Span> },
+    InverseNested  { property: QualifiedName, block: ConstraintBlock, span: Option<Span> },
+    Nested         { property: QualifiedName, block: SubjectBlock, span: Option<Span> },
+    Disjunction  { either_branch: DisjBranch, or_branches: Vec<DisjBranch>, span: Option<Span> },
+}
+
+impl_python! {
+#[pymethods]
+impl PropertyPattern {
+    #[getter]
+    fn kind(&self) -> &str {
+        match self {
+            PropertyPattern::Value { .. }          => "value",
+            PropertyPattern::Constrained { .. }    => "constrained",
+            PropertyPattern::Optional { .. }       => "optional",
+            PropertyPattern::Inverse { .. }        => "inverse",
+            PropertyPattern::InverseNested { .. }  => "inverse_nested",
+            PropertyPattern::Nested { .. }         => "nested",
+            PropertyPattern::Disjunction { .. }    => "disjunction",
+        }
+    }
+    fn __repr__(&self) -> String {
+        format!("PropertyPattern::{}", self.kind())
+    }
+}
+}
+
+/// An anonymous nested block: `[ property1 val\n  property2 val ]`
+#[cfg_attr(feature = "python", pyclass(frozen, get_all, from_py_object))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubjectBlock {
+    pub properties: Vec<PropertyPattern>,
+    pub span: Option<Span>,
+}
+
+impl_python! {
+#[pymethods]
+impl SubjectBlock {
+    #[new]
+    pub fn new(properties: Vec<PropertyPattern>, span: Option<Span>) -> Self {
+        Self { properties, span }
+    }
+    fn __repr__(&self) -> String {
+        format!("SubjectBlock({})", self.properties.len())
+    }
+}
+}
+
+/// One branch in an `either … or …` disjunction
+#[cfg_attr(feature = "python", pyclass(frozen, get_all, from_py_object))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct DisjBranch {
+    pub property: QualifiedName,
+    pub block: ConstraintBlock,
+    pub span: Option<Span>,
+}
+
+impl_python! {
+#[pymethods]
+impl DisjBranch {
+    #[new]
+    pub fn new(property: QualifiedName, block: ConstraintBlock, span: Option<Span>) -> Self {
+        Self { property, block, span }
+    }
+    fn __repr__(&self) -> String {
+        format!("DisjBranch({})", self.property)
+    }
+}
+}
+
+/// `some:` / `none:` existence filter block
+#[cfg_attr(feature = "python", pyclass(frozen, get_all, from_py_object))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExistenceBlock {
+    /// `true` = `none:` (NOT EXISTS), `false` = `some:` (EXISTS)
+    pub negated: bool,
+    pub clauses: Vec<QueryClause>,
+    pub span: Option<Span>,
+}
+
+impl_python! {
+#[pymethods]
+impl ExistenceBlock {
+    #[new]
+    pub fn new(negated: bool, clauses: Vec<QueryClause>, span: Option<Span>) -> Self {
+        Self { negated, clauses, span }
+    }
+    fn __repr__(&self) -> String {
+        format!("ExistenceBlock(negated={})", self.negated)
+    }
+}
+}
+
+/// Body-level aggregation sub-query: `average ?x as ?y` with indented sub-patterns.
+/// Generates an inner sub-SELECT with implicit GROUP BY.
+#[cfg_attr(feature = "python", pyclass(frozen, get_all, from_py_object))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct AggregationQuery {
+    pub kind: AggKind,
+    pub input_var: String,
+    pub result_var: String,
+    pub sub_clauses: Vec<QueryClause>,
+    pub span: Option<Span>,
+}
+
+impl_python! {
+#[pymethods]
+impl AggregationQuery {
+    #[new]
+    pub fn new(kind: AggKind, input_var: String, result_var: String, sub_clauses: Vec<QueryClause>, span: Option<Span>) -> Self {
+        Self { kind, input_var, result_var, sub_clauses, span }
+    }
+    fn __repr__(&self) -> String {
+        format!("AggregationQuery({:?} {} as {})", self.kind, self.input_var, self.result_var)
+    }
+}
+}
+
+/// Inline named-query composition: `queryName as [field ?var …]` or `queryName as ?var`
+#[cfg_attr(feature = "python", pyclass(frozen, get_all, from_py_object))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueryComposition {
+    pub query_name: QualifiedName,
+    pub binding: CompositionBinding,
+    pub span: Option<Span>,
+}
+
+impl_python! {
+#[pymethods]
+impl QueryComposition {
+    #[new]
+    pub fn new(query_name: QualifiedName, binding: CompositionBinding, span: Option<Span>) -> Self {
+        Self { query_name, binding, span }
+    }
+    fn __repr__(&self) -> String {
+        format!("QueryComposition({})", self.query_name)
+    }
+}
+}
+
+/// How query results are bound at the call site
+#[cfg_attr(feature = "python", pyclass(frozen, from_py_object))]
+#[derive(Debug, Clone, PartialEq)]
+pub enum CompositionBinding {
+    /// `[ fieldName ?localVar … ]` — rename projected columns
+    Named(Vec<(String, String)>),
+    /// `as ?var` — scalar single-result binding
+    Scalar(String),
+}
+
+impl_python! {
+#[pymethods]
+impl CompositionBinding {
+    #[getter]
+    fn kind(&self) -> &str {
+        match self {
+            CompositionBinding::Named(_) => "named",
+            CompositionBinding::Scalar(_) => "scalar",
+        }
+    }
+    fn __repr__(&self) -> String {
+        format!("CompositionBinding::{}", self.kind())
+    }
+}
+}
+
+/// `group by ?var` block with aggregation specs and optional HAVING
+#[cfg_attr(feature = "python", pyclass(frozen, get_all, from_py_object))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct GroupByBlock {
+    pub var: String,
+    pub specs: Vec<AggregationSpec>,
+    pub having: Vec<BoolExpr>,
+    pub span: Option<Span>,
+}
+
+impl_python! {
+#[pymethods]
+impl GroupByBlock {
+    #[new]
+    pub fn new(var: String, specs: Vec<AggregationSpec>, having: Vec<BoolExpr>, span: Option<Span>) -> Self {
+        Self { var, specs, having, span }
+    }
+    fn __repr__(&self) -> String {
+        format!("GroupByBlock({})", self.var)
+    }
+}
+}
+
+/// One aggregation line inside a `group by` block
+#[cfg_attr(feature = "python", pyclass(frozen, get_all, from_py_object))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct AggregationSpec {
+    pub kind: AggKind,
+    pub input_var: String,
+    pub result_var: String,
+    pub span: Option<Span>,
+}
+
+impl_python! {
+#[pymethods]
+impl AggregationSpec {
+    #[new]
+    pub fn new(kind: AggKind, input_var: String, result_var: String, span: Option<Span>) -> Self {
+        Self { kind, input_var, result_var, span }
+    }
+    fn __repr__(&self) -> String {
+        format!("AggregationSpec({:?} {} as {})", self.kind, self.input_var, self.result_var)
+    }
+}
+}
+
+/// Aggregation function kind
+#[cfg_attr(feature = "python", pyclass(frozen, from_py_object))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggKind {
+    Count,
+    Average,
+    Sum,
+    Min,
+    Max,
+}
+
+impl_python! {
+#[pymethods]
+impl AggKind {
+    fn __repr__(&self) -> &str {
+        match self {
+            AggKind::Count   => "AggKind::Count",
+            AggKind::Average => "AggKind::Average",
+            AggKind::Sum     => "AggKind::Sum",
+            AggKind::Min     => "AggKind::Min",
+            AggKind::Max     => "AggKind::Max",
+        }
+    }
+}
+}
+
+/// `return` block listing projected columns
+#[cfg_attr(feature = "python", pyclass(frozen, get_all, from_py_object))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReturnBlock {
+    pub columns: Vec<ColumnSpec>,
+    pub limit: Option<u64>,
+    pub span: Option<Span>,
+}
+
+impl_python! {
+#[pymethods]
+impl ReturnBlock {
+    #[new]
+    pub fn new(columns: Vec<ColumnSpec>, limit: Option<u64>, span: Option<Span>) -> Self {
+        Self { columns, limit, span }
+    }
+    fn __repr__(&self) -> String {
+        format!("ReturnBlock(columns={})", self.columns.len())
+    }
+}
+}
+
+/// One column in a `return` block
+#[cfg_attr(feature = "python", pyclass(frozen, get_all, from_py_object))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColumnSpec {
+    pub alias: Option<String>,
+    pub var: String,
+    pub order: Option<OrderDir>,
+    pub distinct: bool,
+    pub span: Option<Span>,
+}
+
+impl_python! {
+#[pymethods]
+impl ColumnSpec {
+    #[new]
+    pub fn new(alias: Option<String>, var: String, order: Option<OrderDir>, distinct: bool, span: Option<Span>) -> Self {
+        Self { alias, var, order, distinct, span }
+    }
+    fn __repr__(&self) -> String {
+        format!("ColumnSpec({})", self.var)
+    }
+}
+}
+
+/// Sort direction for a return column
+#[cfg_attr(feature = "python", pyclass(frozen, from_py_object))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderDir {
+    Asc,
+    Desc,
+}
+
+impl_python! {
+#[pymethods]
+impl OrderDir {
+    fn __repr__(&self) -> &str {
+        match self {
+            OrderDir::Asc  => "OrderDir::Asc",
+            OrderDir::Desc => "OrderDir::Desc",
+        }
+    }
+}
+}
+
+/// A boolean comparison expression (used in bare filters and HAVING)
+#[cfg_attr(feature = "python", pyclass(frozen, get_all, from_py_object))]
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoolExpr {
+    pub left: BoolOperand,
+    pub op: ComparisonOp,
+    pub right: BoolOperand,
+    pub span: Option<Span>,
+}
+
+impl_python! {
+#[pymethods]
+impl BoolExpr {
+    #[new]
+    pub fn new(left: BoolOperand, op: ComparisonOp, right: BoolOperand, span: Option<Span>) -> Self {
+        Self { left, op, right, span }
+    }
+    fn __repr__(&self) -> String {
+        format!("BoolExpr({:?} {:?})", self.left, self.right)
+    }
+}
+}
+
+/// One side of a boolean comparison
+#[cfg_attr(feature = "python", pyclass(frozen, from_py_object))]
+#[derive(Debug, Clone, PartialEq)]
+pub enum BoolOperand {
+    Variable(String),
+    Literal(Literal),
+}
+
+impl_python! {
+#[pymethods]
+impl BoolOperand {
+    #[getter]
+    fn kind(&self) -> &str {
+        match self {
+            BoolOperand::Variable(_) => "variable",
+            BoolOperand::Literal(_)  => "literal",
+        }
+    }
+    fn __repr__(&self) -> String {
+        match self {
+            BoolOperand::Variable(v) => format!("BoolOperand::Variable({})", v),
+            BoolOperand::Literal(_)  => "BoolOperand::Literal(...)".to_string(),
+        }
     }
 }
 }
@@ -880,6 +1692,26 @@ pub enum Pattern {
         patterns: Vec<Pattern>,
         span: Option<Span>,
     },
+    /// A query call pattern (invoke a named query with argument bindings)
+    QueryCall {
+        /// The name of the query being called
+        name: QualifiedName,
+        /// Argument bindings passed to the query
+        args: Vec<QueryArg>,
+        span: Option<Span>,
+    },
+    /// An inverse triple pattern (`subject is property of object`).
+    /// Desugars to `object property subject`; `object` may be
+    /// `Object::Constraint { block }` for the nested form.
+    Inverse {
+        /// The subject (the object of the underlying triple)
+        subject: Subject,
+        /// The property to match
+        property: QualifiedName,
+        /// The object (the subject of the underlying triple)
+        object: Object,
+        span: Option<Span>,
+    },
 }
 
 impl_python! {
@@ -891,23 +1723,27 @@ impl Pattern {
             Pattern::Triple { .. } => "triple",
             Pattern::Type { .. } => "type",
             Pattern::Quantified { .. } => "quantified",
+            Pattern::QueryCall { .. } => "query_call",
+            Pattern::Inverse { .. } => "inverse",
         }
     }
 
     #[getter]
     fn subject(&self) -> Option<Subject> {
         match self {
-            Pattern::Triple { subject, .. } | Pattern::Type { subject, .. } => {
-                Some(subject.clone())
-            }
-            Pattern::Quantified { .. } => None,
+            Pattern::Triple { subject, .. }
+            | Pattern::Type { subject, .. }
+            | Pattern::Inverse { subject, .. } => Some(subject.clone()),
+            Pattern::Quantified { .. } | Pattern::QueryCall { .. } => None,
         }
     }
 
     #[getter]
     fn property(&self) -> Option<QualifiedName> {
         match self {
-            Pattern::Triple { property, .. } => Some(property.clone()),
+            Pattern::Triple { property, .. } | Pattern::Inverse { property, .. } => {
+                Some(property.clone())
+            }
             _ => None,
         }
     }
@@ -915,7 +1751,9 @@ impl Pattern {
     #[getter]
     fn object(&self) -> Option<Object> {
         match self {
-            Pattern::Triple { object, .. } => Some(object.clone()),
+            Pattern::Triple { object, .. } | Pattern::Inverse { object, .. } => {
+                Some(object.clone())
+            }
             _ => None,
         }
     }
@@ -960,6 +1798,22 @@ impl Pattern {
         }
     }
 
+    #[getter]
+    fn query_name(&self) -> Option<QualifiedName> {
+        match self {
+            Pattern::QueryCall { name, .. } => Some(name.clone()),
+            _ => None,
+        }
+    }
+
+    #[getter]
+    fn query_args(&self) -> Option<Vec<QueryArg>> {
+        match self {
+            Pattern::QueryCall { args, .. } => Some(args.clone()),
+            _ => None,
+        }
+    }
+
     fn __repr__(&self) -> String {
         match self {
             Pattern::Triple {
@@ -980,10 +1834,83 @@ impl Pattern {
             } => {
                 format!("Pattern::Quantified({:?} {})", quantifier, variable)
             }
+            Pattern::QueryCall { name, args, .. } => {
+                format!("Pattern::QueryCall({} args={})", name, args.len())
+            }
+            Pattern::Inverse {
+                subject,
+                property,
+                object,
+                ..
+            } => {
+                format!("Pattern::Inverse({:?} is {} of {:?})", subject, property, object)
+            }
         }
     }
 }
 }
+
+/// Argument in a query call
+#[cfg_attr(feature = "python", pyclass(frozen, from_py_object))]
+#[derive(Debug, Clone, PartialEq)]
+pub enum QueryArg {
+    /// Shorthand variable binding: ?var maps to same-named query param
+    Var {
+        name: String,
+        span: Option<Span>,
+    },
+    /// Explicit binding: ?param = <value>
+    Binding {
+        param: String,
+        value: Object,
+        span: Option<Span>,
+    },
+}
+
+impl_python! {
+#[pymethods]
+impl QueryArg {
+    #[getter]
+    fn kind(&self) -> &str {
+        match self {
+            QueryArg::Var { .. } => "var",
+            QueryArg::Binding { .. } => "binding",
+        }
+    }
+
+    #[getter]
+    fn name(&self) -> Option<String> {
+        match self {
+            QueryArg::Var { name, .. } => Some(name.clone()),
+            _ => None,
+        }
+    }
+
+    #[getter]
+    fn param(&self) -> Option<String> {
+        match self {
+            QueryArg::Binding { param, .. } => Some(param.clone()),
+            _ => None,
+        }
+    }
+
+    #[getter]
+    fn value(&self) -> Option<Object> {
+        match self {
+            QueryArg::Binding { value, .. } => Some(value.clone()),
+            _ => None,
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        match self {
+            QueryArg::Var { name, .. } => format!("QueryArg::Var({})", name),
+            QueryArg::Binding { param, .. } => format!("QueryArg::Binding({}=...)", param),
+        }
+    }
+}
+}
+
 /// Subject of a pattern
 #[cfg_attr(feature = "python", pyclass(frozen, from_py_object))]
 #[derive(Debug, Clone, PartialEq)]
@@ -1099,6 +2026,10 @@ pub enum Expr {
         value: Literal,
         span: Option<Span>,
     },
+    Variable {
+        name: String,
+        span: Option<Span>,
+    },
     BinaryOp {
         op: BinaryOp,
         left: Box<Expr>,
@@ -1119,6 +2050,7 @@ impl Expr {
     fn kind(&self) -> &str {
         match self {
             Expr::Literal { .. } => "literal",
+            Expr::Variable { .. } => "variable",
             Expr::BinaryOp { .. } => "binary_op",
             Expr::UnaryOp { .. } => "unary_op",
         }
@@ -1175,6 +2107,7 @@ impl Expr {
     fn __repr__(&self) -> String {
         match self {
             Expr::Literal { value, .. } => format!("Expr::Literal({:?})", value),
+            Expr::Variable { name, .. } => format!("Expr::Variable({})", name),
             Expr::BinaryOp { op, left, right, .. } => {
                 format!("Expr::BinaryOp({:?}, {:?}, {:?})", op, left, right)
             }
@@ -1190,6 +2123,7 @@ impl fmt::Display for Expr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Expr::Literal { value, .. } => write!(f, "{}", value),
+            Expr::Variable { name, .. } => write!(f, "{}", name),
             Expr::BinaryOp { op, left, right, .. } => {
                 let sym = match op {
                     BinaryOp::Add => "+",
@@ -1332,6 +2266,7 @@ pub enum Constraint {
         span: Option<Span>,
     },
     Comparison {
+        binding: Option<String>,
         operator: ComparisonOp,
         value: Expr,
         span: Option<Span>,
@@ -1342,6 +2277,19 @@ pub enum Constraint {
         span: Option<Span>,
     },
     PropertyConstraint {
+        property: QualifiedName,
+        block: ConstraintBlock,
+        span: Option<Span>,
+    },
+    /// Inverse property usage: `is property of value`
+    /// (`value` is the subject of the underlying triple, the constrained node the object).
+    Inverse {
+        property: QualifiedName,
+        value: Object,
+        span: Option<Span>,
+    },
+    /// Inverse property usage with a nested block: `is property of [ ... ]`
+    InverseNested {
         property: QualifiedName,
         block: ConstraintBlock,
         span: Option<Span>,
@@ -1358,6 +2306,8 @@ impl Constraint {
             Constraint::Comparison { .. } => "comparison",
             Constraint::PropertyValue { .. } => "property_value",
             Constraint::PropertyConstraint { .. } => "property_constraint",
+            Constraint::Inverse { .. } => "inverse",
+            Constraint::InverseNested { .. } => "inverse_nested",
         }
     }
 
@@ -1365,6 +2315,14 @@ impl Constraint {
     fn type_ref(&self) -> Option<TypeRef> {
         match self {
             Constraint::TypeIs { type_ref, .. } => Some(type_ref.clone()),
+            _ => None,
+        }
+    }
+
+    #[getter]
+    fn binding(&self) -> Option<String> {
+        match self {
+            Constraint::Comparison { binding, .. } => binding.clone(),
             _ => None,
         }
     }
@@ -1391,6 +2349,8 @@ impl Constraint {
         match self {
             Constraint::PropertyValue { property, .. } => Some(property.clone()),
             Constraint::PropertyConstraint { property, .. } => Some(property.clone()),
+            Constraint::Inverse { property, .. } => Some(property.clone()),
+            Constraint::InverseNested { property, .. } => Some(property.clone()),
             _ => None,
         }
     }
@@ -1399,6 +2359,7 @@ impl Constraint {
     fn block(&self) -> Option<ConstraintBlock> {
         match self {
             Constraint::PropertyConstraint { block, .. } => Some(block.clone()),
+            Constraint::InverseNested { block, .. } => Some(block.clone()),
             _ => None,
         }
     }
@@ -1406,8 +2367,8 @@ impl Constraint {
     fn __repr__(&self) -> String {
         match self {
             Constraint::TypeIs { type_ref, .. } => format!("Constraint::TypeIs({:?})", type_ref),
-            Constraint::Comparison { operator, value, .. } => {
-                format!("Constraint::Comparison({:?} {:?})", operator, value)
+            Constraint::Comparison { binding, operator, value, .. } => {
+                format!("Constraint::Comparison({:?} {:?} {:?})", binding, operator, value)
             }
             Constraint::PropertyValue { property, value, .. } => {
                 format!("Constraint::PropertyValue({} {:?})", property, value)
@@ -1415,10 +2376,66 @@ impl Constraint {
             Constraint::PropertyConstraint { property, block, .. } => {
                 format!("Constraint::PropertyConstraint({} {:?})", property, block)
             }
+            Constraint::Inverse { property, value, .. } => {
+                format!("Constraint::Inverse({} {:?})", property, value)
+            }
+            Constraint::InverseNested { property, block, .. } => {
+                format!("Constraint::InverseNested({} {:?})", property, block)
+            }
         }
     }
 }
 }
+/// A file-header item: either a prefix statement or a temporal directive.
+/// Used only transiently by the parser so prefixes and `@locale`/`@timezone`
+/// directives may appear in any order at the top of a file.
+pub enum HeaderItem {
+    Prefixes(Vec<PrefixDecl>),
+    Locale(String),
+    Timezone(String),
+}
+
+/// The declared type of a temporal smart literal, i.e. which constructor
+/// keyword introduced it (`date(...)`, `time(...)`, `date_time(...)`,
+/// `duration(...)`). The value itself is parsed by the `dolfin-datetime` crate,
+/// which also infers a type; the declared kind is validated against it.
+#[cfg_attr(feature = "python", pyclass(eq, eq_int))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TemporalKind {
+    Date,
+    Time,
+    DateTime,
+    Duration,
+}
+
+impl TemporalKind {
+    /// The Dolfin constructor keyword.
+    pub fn keyword(self) -> &'static str {
+        match self {
+            TemporalKind::Date => "date",
+            TemporalKind::Time => "time",
+            TemporalKind::DateTime => "date_time",
+            TemporalKind::Duration => "duration",
+        }
+    }
+
+    /// The XSD datatype IRI (compact form) this kind serialises to.
+    pub fn xsd_type(self) -> &'static str {
+        match self {
+            TemporalKind::Date => "xsd:date",
+            TemporalKind::Time => "xsd:time",
+            TemporalKind::DateTime => "xsd:dateTime",
+            TemporalKind::Duration => "xsd:duration",
+        }
+    }
+}
+
+impl fmt::Display for TemporalKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.keyword())
+    }
+}
+
 /// Literal values
 #[cfg_attr(feature = "python", pyclass(frozen, from_py_object))]
 #[derive(Debug, Clone, PartialEq)]
@@ -1428,6 +2445,122 @@ pub enum Literal {
     String { value: String, span: Option<Span> },
     Boolean { value: bool, span: Option<Span> },
     Iri { value: String, span: Option<Span> },
+    /// A temporal smart literal such as `date(June 1st 2026)`. `content` is the
+    /// raw text between the parentheses, handed verbatim to `dolfin-datetime`.
+    Temporal {
+        kind: TemporalKind,
+        content: String,
+        span: Option<Span>,
+    },
+    /// A physical-quantity smart literal such as `quantity(42 km/h)`. `content`
+    /// is the raw text between the parentheses, handed verbatim to
+    /// `dolfin-units`. A trailing `as <unit>` inside `content` is a conversion
+    /// directive resolved at parse time (see [`Literal::resolve_quantity`]).
+    Quantity {
+        content: String,
+        span: Option<Span>,
+    },
+}
+
+impl Literal {
+    /// Resolve a temporal literal to its XSD lexical form and datatype, using
+    /// the `dolfin-datetime` parser and the file-level `TemporalContext` built
+    /// from `@locale` / `@timezone`. Returns `Ok((value, xsd_type))`, e.g.
+    /// `("2026-06-01", "xsd:date")`. `None` for non-temporal literals.
+    ///
+    /// Pass `&TemporalContext::strict()` (or `&Default::default()`) when no
+    /// file-level defaults apply; then numeric dates need an inline `as` mask
+    /// and times are timezone-naive unless they carry an inline offset.
+    pub fn resolve_temporal(
+        &self,
+        ctx: &dolfin_datetime::TemporalContext,
+    ) -> Option<Result<(String, &'static str), String>> {
+        let (kind, content) = match self {
+            Literal::Temporal { kind, content, .. } => (*kind, content),
+            _ => return None,
+        };
+        Some(
+            dolfin_datetime::parse_temporal(content, ctx)
+                .map_err(|e| e.to_string())
+                .and_then(|expr| {
+                    let got = temporal_kind_of(&expr);
+                    if got == kind {
+                        Ok((expr.to_xsd(), kind.xsd_type()))
+                    } else {
+                        Err(format!(
+                            "{}(...) declared but value parses as a {}",
+                            kind.keyword(),
+                            got.keyword()
+                        ))
+                    }
+                }),
+        )
+    }
+
+    /// Resolve a `quantity(...)` literal via the `dolfin-units` parser, using
+    /// only builtin units (no project-declared `unitdef`/`unitdef family`
+    /// declarations — see [`Self::resolve_quantity_with`] for that). Returns
+    /// the fully evaluated [`dolfin_units::Quantity`] (arithmetic and any
+    /// trailing `as <unit>` conversion already applied), or a human-readable
+    /// error string suitable for a Dolfin compile diagnostic. `None` for
+    /// non-quantity literals.
+    pub fn resolve_quantity(&self) -> Option<Result<dolfin_units::Quantity, String>> {
+        self.resolve_quantity_with(&dolfin_units::UnitRegistry::with_defaults())
+    }
+
+    /// Same as [`Self::resolve_quantity`], but resolves unit tokens against
+    /// `registry` first — pass a project-scoped registry (built from a
+    /// package's `unit` declarations) so currency and nominal/family units
+    /// the project declared itself are recognized.
+    pub fn resolve_quantity_with(&self, registry: &dolfin_units::UnitRegistry) -> Option<Result<dolfin_units::Quantity, String>> {
+        let content = match self {
+            Literal::Quantity { content, .. } => content,
+            _ => return None,
+        };
+        Some(dolfin_units::parse_quantity_with(content, registry).map_err(|e| e.to_string()))
+    }
+}
+
+impl OntologyFile {
+    /// Build a `dolfin-datetime` `TemporalContext` from this file's `@locale`
+    /// and `@timezone` directives. Returns a context error string if a
+    /// directive is malformed (bad locale order, unknown timezone). Absent
+    /// directives yield a strict (default) context.
+    pub fn temporal_context(&self) -> Result<dolfin_datetime::TemporalContext, String> {
+        let locale = match &self.locale {
+            Some(s) => Some(parse_locale_arg(s)?),
+            None => None,
+        };
+        let timezone = match &self.timezone {
+            Some(s) => {
+                let tz = dolfin_datetime::Timezone::Named(s.clone());
+                // Resolve eagerly so an unknown/unsupported zone surfaces here.
+                tz.resolve().map_err(|e| e.to_string())?;
+                Some(tz)
+            }
+            None => None,
+        };
+        Ok(dolfin_datetime::TemporalContext { locale, timezone })
+    }
+}
+
+/// Parse a `@locale` argument like `d/m/y` into a `DateLocale`.
+fn parse_locale_arg(arg: &str) -> Result<dolfin_datetime::DateLocale, String> {
+    let sep = ['/', '-', '.']
+        .into_iter()
+        .find(|c| arg.contains(*c))
+        .ok_or_else(|| format!("@locale '{arg}' needs a / - or . separator"))?;
+    dolfin_datetime::parse_locale_order(arg, sep).map_err(|e| e.to_string())
+}
+
+fn temporal_kind_of(expr: &dolfin_datetime::TemporalExpr) -> TemporalKind {
+    use dolfin_datetime::TemporalExpr as TE;
+    match expr {
+        TE::Date(_) => TemporalKind::Date,
+        TE::Time(_) => TemporalKind::Time,
+        TE::DateTime(_) => TemporalKind::DateTime,
+        TE::Duration(_) => TemporalKind::Duration,
+    }
 }
 
 impl_python! {
@@ -1441,6 +2574,8 @@ impl Literal {
             Literal::String { .. } => "string",
             Literal::Boolean { .. } => "boolean",
             Literal::Iri { .. } => "iri",
+            Literal::Temporal { .. } => "temporal",
+            Literal::Quantity { .. } => "quantity",
         }
     }
 
@@ -1484,6 +2619,24 @@ impl Literal {
         }
     }
 
+    /// The raw content of a temporal literal (text between the parentheses).
+    #[getter]
+    fn temporal_value(&self) -> Option<String> {
+        match self {
+            Literal::Temporal { content, .. } => Some(content.clone()),
+            _ => None,
+        }
+    }
+
+    /// The raw content of a quantity literal (text between the parentheses).
+    #[getter]
+    fn quantity_value(&self) -> Option<String> {
+        match self {
+            Literal::Quantity { content, .. } => Some(content.clone()),
+            _ => None,
+        }
+    }
+
     fn __repr__(&self) -> String {
         match self {
             Literal::Int { value: v, .. } => format!("Literal::Int({})", v),
@@ -1491,6 +2644,12 @@ impl Literal {
             Literal::String { value: v, .. } => format!("Literal::String({:?})", v),
             Literal::Boolean { value: v, .. } => format!("Literal::Boolean({})", v),
             Literal::Iri { value: v, .. } => format!("Literal::Iri({})", v),
+            Literal::Temporal { kind, content, .. } => {
+                format!("Literal::Temporal({}, {:?})", kind.keyword(), content)
+            }
+            Literal::Quantity { content, .. } => {
+                format!("Literal::Quantity({:?})", content)
+            }
         }
     }
 }
@@ -1504,6 +2663,8 @@ impl fmt::Display for Literal {
             Literal::String { value: v, .. } => write!(f, "{:?}", v),
             Literal::Boolean { value: v, .. } => write!(f, "{}", if *v { "true" } else { "false" }),
             Literal::Iri { value: v, .. } => write!(f, "<{}>", v),
+            Literal::Temporal { kind, content, .. } => write!(f, "{}({})", kind.keyword(), content),
+            Literal::Quantity { content, .. } => write!(f, "quantity({})", content),
         }
     }
 }
@@ -1569,6 +2730,42 @@ impl TypeRef {
     fn boolean() -> Self {
         TypeRef::Primitive {
             kind: PrimitiveKind::Boolean,
+            span: None,
+        }
+    }
+
+    /// Create a date type reference
+    #[staticmethod]
+    fn date() -> Self {
+        TypeRef::Primitive {
+            kind: PrimitiveKind::Date,
+            span: None,
+        }
+    }
+
+    /// Create a date_time type reference
+    #[staticmethod]
+    fn date_time() -> Self {
+        TypeRef::Primitive {
+            kind: PrimitiveKind::DateTime,
+            span: None,
+        }
+    }
+
+    /// Create a time type reference
+    #[staticmethod]
+    fn time() -> Self {
+        TypeRef::Primitive {
+            kind: PrimitiveKind::Time,
+            span: None,
+        }
+    }
+
+    /// Create a duration type reference
+    #[staticmethod]
+    fn duration() -> Self {
+        TypeRef::Primitive {
+            kind: PrimitiveKind::Duration,
             span: None,
         }
     }
@@ -2014,6 +3211,10 @@ pub enum PrimitiveKind {
     Int,
     Float,
     Boolean,
+    Date,
+    DateTime,
+    Time,
+    Duration,
 }
 
 impl_python! {
@@ -2025,6 +3226,10 @@ impl PrimitiveKind {
             PrimitiveKind::Int => "PrimitiveKind.Int",
             PrimitiveKind::Float => "PrimitiveKind.Float",
             PrimitiveKind::Boolean => "PrimitiveKind.Boolean",
+            PrimitiveKind::Date => "PrimitiveKind.Date",
+            PrimitiveKind::DateTime => "PrimitiveKind.DateTime",
+            PrimitiveKind::Time => "PrimitiveKind.Time",
+            PrimitiveKind::Duration => "PrimitiveKind.Duration",
         }
     }
 
@@ -2034,6 +3239,10 @@ impl PrimitiveKind {
             PrimitiveKind::Int => "int",
             PrimitiveKind::Float => "float",
             PrimitiveKind::Boolean => "boolean",
+            PrimitiveKind::Date => "date",
+            PrimitiveKind::DateTime => "date_time",
+            PrimitiveKind::Time => "time",
+            PrimitiveKind::Duration => "duration",
         }
     }
 }
@@ -2144,7 +3353,7 @@ impl FactValue {
 #[derive(Debug, Clone, PartialEq)]
 pub enum FactAssertion {
     /// `property_name value, ...`
-    Property { name: String, values: Vec<FactValue>, span: Option<Span> },
+    Property { property: QualifiedName, values: Vec<FactValue>, span: Option<Span> },
     /// `is property of value`  (inverse property form)
     Inverse { property: QualifiedName, value: FactValue, span: Option<Span> },
     /// `a ConceptName`  (type hint inside anonymous block)
@@ -2164,14 +3373,6 @@ impl FactAssertion {
     }
 
     #[getter]
-    fn name(&self) -> Option<String> {
-        match self {
-            FactAssertion::Property { name, .. } => Some(name.clone()),
-            _ => None,
-        }
-    }
-
-    #[getter]
     fn values(&self) -> Option<Vec<FactValue>> {
         match self {
             FactAssertion::Property { values, .. } => Some(values.clone()),
@@ -2183,6 +3384,7 @@ impl FactAssertion {
     fn property(&self) -> Option<QualifiedName> {
         match self {
             FactAssertion::Inverse { property, .. } => Some(property.clone()),
+            FactAssertion::Property { property, .. } => Some(property.clone()),
             _ => None,
         }
     }
@@ -2205,8 +3407,8 @@ impl FactAssertion {
 
     fn __repr__(&self) -> String {
         match self {
-            FactAssertion::Property { name, values, .. } => {
-                format!("FactAssertion::Property({}, {} value(s))", name, values.len())
+            FactAssertion::Property { property, values, .. } => {
+                format!("FactAssertion::Property({}, {} value(s))", property, values.len())
             }
             FactAssertion::Inverse { property, .. } => {
                 format!("FactAssertion::Inverse({})", property.full())
@@ -2230,6 +3432,8 @@ pub struct FactDef {
     /// Property assertions and inverse assertions
     pub assertions: Vec<FactAssertion>,
     pub span: Option<Span>,
+    /// Span of just the id token (for rename support)
+    pub id_span: Option<Span>,
 }
 
 impl_python! {
@@ -2238,7 +3442,7 @@ impl FactDef {
     #[new]
     #[pyo3(signature = (id, types, assertions, span=None))]
     pub fn new(id: String, types: Vec<QualifiedName>, assertions: Vec<FactAssertion>, span: Option<Span>) -> Self {
-        Self { id, types, assertions, span }
+        Self { id, types, assertions, span, id_span: None }
     }
 
     fn __repr__(&self) -> String {

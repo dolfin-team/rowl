@@ -138,7 +138,7 @@ impl Package {
             .iter()
             .flat_map(|(ns, onto)| {
                 onto.ast.concepts_as_ref().into_iter().filter_map(move |c| {
-                    if c.one_of.is_some() {
+                    if let Some(_) = c.one_of {
                         Some((ns, c))
                     } else {
                         None
@@ -146,6 +146,35 @@ impl Package {
                 })
             })
             .collect()
+    }
+
+    /// Work out which file a concept *reference* should be declared in.
+    ///
+    /// Powers the "Declare concept" quick-fix. Given the namespace of the file
+    /// where the undeclared reference appears (`current_ns`) and the reference
+    /// itself, returns the target file, the local concept name, and whether the
+    /// file already exists. See [`resolver::resolve_concept_file`] for the
+    /// mapping rules (prefix → file, alias expansion, case folding).
+    pub fn concept_file_target(
+        &self,
+        current_ns: &QualifiedName,
+        reference: &QualifiedName,
+    ) -> resolver::ConceptFileTarget {
+        // Empty alias map when the current file is unknown (e.g. an in-flight
+        // buffer not yet part of the package) — only affects alias expansion.
+        static NO_PREFIXES: std::sync::OnceLock<HashMap<String, QualifiedName>> =
+            std::sync::OnceLock::new();
+        let resolved_prefixes = self
+            .get_ontology(current_ns)
+            .map(|o| &o.resolved_prefixes)
+            .unwrap_or_else(|| NO_PREFIXES.get_or_init(HashMap::new));
+
+        resolver::resolve_concept_file(
+            reference,
+            self.namespace(),
+            resolved_prefixes,
+            |ns| self.get_ontology(ns).map(|o| o.relative_path.clone()),
+        )
     }
 
     /// Get all rules across all ontologies.
@@ -167,7 +196,7 @@ pub struct OntologyFile {
     /// Resolved namespace for this file (derived from path)
     pub namespace: QualifiedName,
     /// IRI name override (from @iri_name annotation), if any
-    pub iri_name: Option<String>,
+    pub iri_name: Option<crate::ast::IriNameValue>,
     /// Resolved prefix mappings (alias -> full namespace)
     pub resolved_prefixes: HashMap<String, QualifiedName>,
     /// Parsed AST
@@ -180,13 +209,15 @@ impl OntologyFile {
     /// Get the IRI segment name for this ontology.
     /// Uses the @iri_name override if present, otherwise the last part of the namespace.
     pub fn iri_segment(&self) -> &str {
-        self.iri_name.as_deref().unwrap_or_else(|| {
-            self.namespace
-                .parts
-                .last()
-                .map(|s| s.as_str())
-                .unwrap_or("")
-        })
+        self.iri_name.as_ref()
+            .map(|v| v.as_str())
+            .unwrap_or_else(|| {
+                self.namespace
+                    .parts
+                    .last()
+                    .map(|s| s.as_str())
+                    .unwrap_or("")
+            })
     }
 }
 

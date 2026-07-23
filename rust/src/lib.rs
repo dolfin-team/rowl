@@ -59,6 +59,11 @@ pub use parser::{
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 
+#[cfg(feature = "python")]
+use crate::{
+    error::{DolfinParseError, ParseResult},
+    parser::parse_result_strict,
+};
 
 /// Parse Dolfin source code from a string.
 ///
@@ -201,7 +206,29 @@ fn rowl(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ConceptMember>()?;
     m.add_class::<HasDeclaration>()?;
     m.add_class::<PropertyDef>()?;
+    m.add_class::<PropertyAxiom>()?;
+    m.add_class::<PropertyPath>()?;
     m.add_class::<RuleDef>()?;
+    m.add_class::<QueryDef>()?;
+    m.add_class::<QueryBody>()?;
+    m.add_class::<QueryClause>()?;
+    m.add_class::<InverseTriple>()?;
+    m.add_class::<SubjectPattern>()?;
+    m.add_class::<PropertyPattern>()?;
+    m.add_class::<SubjectBlock>()?;
+    m.add_class::<DisjBranch>()?;
+    m.add_class::<ExistenceBlock>()?;
+    m.add_class::<QueryComposition>()?;
+    m.add_class::<CompositionBinding>()?;
+    m.add_class::<GroupByBlock>()?;
+    m.add_class::<AggregationSpec>()?;
+    m.add_class::<AggKind>()?;
+    m.add_class::<ReturnBlock>()?;
+    m.add_class::<ColumnSpec>()?;
+    m.add_class::<OrderDir>()?;
+    m.add_class::<BoolExpr>()?;
+    m.add_class::<BoolOperand>()?;
+    m.add_class::<QueryArg>()?;
     m.add_class::<MatchBlock>()?;
     m.add_class::<ThenBlock>()?;
     m.add_class::<ThenItem>()?;

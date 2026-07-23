@@ -4,6 +4,7 @@
 //! similar to Python's lexer.
 
 use crate::{
+    ast::TemporalKind,
     comment::{Comment, CommentSink},
     error::{ErrorCode, LexerError, Location, Span},
 };
@@ -45,8 +46,36 @@ pub enum Token {
     Is,
     /// 'fact' keyword (instance declaration)
     Fact,
+    /// 'query' keyword (query definition)
+    Query,
+    /// 'return' keyword (query projection block)
+    Return,
+    /// 'either' keyword (query disjunction)
+    Either,
+    /// 'or' keyword (query disjunction branch)
+    Or,
+    /// 'group by' compound keyword (query aggregation)
+    GroupBy,
     /// 'is' keyword (inverse property assertion in fact blocks)
     IsInverse,
+    /// 'inverse of' keyword pair (property axiom)
+    InverseOf,
+    /// 'equivalent to' keyword pair (property axiom)
+    EquivalentTo,
+    /// 'transitive' keyword (property characteristic)
+    Transitive,
+    /// 'symmetric' keyword (property characteristic)
+    Symmetric,
+    /// 'reflexive' keyword (property characteristic)
+    Reflexive,
+    /// 'unit' keyword (unit declaration)
+    Unit,
+    /// 'family' keyword (unit family declaration)
+    Family,
+    /// 'nominal' keyword (nominal/incommensurable unit declaration)
+    Nominal,
+    /// 'scale' keyword (unit scale factor)
+    Scale,
 
     // Quantifier keywords
     /// 'all' quantifier
@@ -83,6 +112,14 @@ pub enum Token {
     TFloat,
     /// 'boolean' type keyword
     TBoolean,
+    /// 'date' type keyword
+    TDate,
+    /// 'date_time' type keyword
+    TDateTime,
+    /// 'time' type keyword
+    TTime,
+    /// 'duration' type keyword
+    TDuration,
 
     // Literals
     /// Integer literal
@@ -95,8 +132,18 @@ pub enum Token {
     Boolean(bool),
     /// IRI literal
     Iri(String),
+    /// Temporal smart literal: (declared kind, raw content between parens)
+    TemporalLit((TemporalKind, String)),
+    /// Physical-quantity smart literal: raw content between `quantity(` `)`.
+    QuantityLit(String),
+    /// `@locale <arg>` directive (raw argument)
+    LocaleDirective(String),
+    /// `@timezone <arg>` directive (raw argument)
+    TimezoneDirective(String),
 
     // Identifiers and special
+    /// Prefixed name (alias:LocalName with no whitespace around colon)
+    PrefixedName((String, String)),
     /// Identifier name
     Name(String),
     /// Variable (starts with ?)
@@ -119,6 +166,8 @@ pub enum Token {
     Pipe,
     /// Double caret (^^)
     DoubleCaret,
+    /// Hat / caret (^) — property path inverse
+    Hat,
 
     // Brackets
     /// Left bracket ([)
@@ -183,11 +232,25 @@ impl std::fmt::Display for Token {
             Token::Key => write!(f, "key"),
             Token::Is => write!(f, "a"),
             Token::Fact => write!(f, "fact"),
+        Token::Query => write!(f, "query"),
+            Token::Return => write!(f, "return"),
+            Token::Either => write!(f, "either"),
+            Token::Or => write!(f, "or"),
+            Token::GroupBy => write!(f, "group by"),
             Token::IsInverse => write!(f, "is"),
+            Token::InverseOf => write!(f, "inverse of"),
+            Token::EquivalentTo => write!(f, "equivalent to"),
+            Token::Transitive => write!(f, "transitive"),
+            Token::Symmetric => write!(f, "symmetric"),
+            Token::Reflexive => write!(f, "reflexive"),
+            Token::Unit => write!(f, "unitdef"),
+            Token::Family => write!(f, "family"),
+            Token::Nominal => write!(f, "nominal"),
+            Token::Scale => write!(f, "scale"),
             Token::All => write!(f, "all"),
             Token::None => write!(f, "none"),
-            Token::AtLeast => write!(f, "at_least"),
-            Token::AtMost => write!(f, "at_most"),
+            Token::AtLeast => write!(f, "at least"),
+            Token::AtMost => write!(f, "at most"),
             Token::Exactly => write!(f, "exactly"),
             Token::Between => write!(f, "between"),
             Token::Of => write!(f, "of"),
@@ -199,11 +262,20 @@ impl std::fmt::Display for Token {
             Token::TInt => write!(f, "int"),
             Token::TFloat => write!(f, "float"),
             Token::TBoolean => write!(f, "boolean"),
+            Token::TDate => write!(f, "date"),
+            Token::TDateTime => write!(f, "date_time"),
+            Token::TTime => write!(f, "time"),
+            Token::TDuration => write!(f, "duration"),
             Token::Int(n) => write!(f, "{}", n),
             Token::Float(n) => write!(f, "{}", n),
             Token::String(s) => write!(f, "\"{}\"", s),
             Token::Boolean(b) => write!(f, "{}", b),
             Token::Iri(s) => write!(f, "<{}>", s),
+            Token::TemporalLit((kind, content)) => write!(f, "{}({})", kind.keyword(), content),
+            Token::QuantityLit(content) => write!(f, "quantity({})", content),
+            Token::LocaleDirective(a) => write!(f, "@locale {}", a),
+            Token::TimezoneDirective(a) => write!(f, "@timezone {}", a),
+            Token::PrefixedName((prefix, local)) => write!(f, "{}:{}", prefix, local),
             Token::Name(s) => write!(f, "{}", s),
             Token::Variable(s) => write!(f, "{}", s),
             Token::Colon => write!(f, ":"),
@@ -231,6 +303,7 @@ impl std::fmt::Display for Token {
             Token::Newline => write!(f, "NEWLINE"),
             Token::Eof => write!(f, "EOF"),
             Token::DoubleCaret => write!(f, "^^"),
+            Token::Hat => write!(f, "^"),
         }
     }
 }
@@ -286,9 +359,51 @@ pub enum RawToken {
     /// 'fact' keyword (instance declaration)
     #[token("fact")]
     Fact,
+    /// 'query' keyword (query definition)
+    #[token("query")]
+    Query,
+    /// 'return' keyword (query projection block)
+    #[token("return")]
+    Return,
+    /// 'either' keyword (query disjunction)
+    #[token("either")]
+    Either,
+    /// 'or' keyword (query disjunction branch)
+    #[token("or")]
+    Or,
+    /// 'group by' compound keyword (query aggregation)
+    #[token("group by")]
+    GroupBy,
     /// 'is' keyword (inverse property assertion in fact blocks)
     #[token("is")]
     IsInverse,
+    /// 'inverse of' keyword pair (property axiom)
+    #[token("inverse of")]
+    InverseOf,
+    /// 'equivalent to' keyword pair (property axiom)
+    #[token("equivalent to")]
+    EquivalentTo,
+    /// 'transitive' keyword (property characteristic)
+    #[token("transitive")]
+    Transitive,
+    /// 'symmetric' keyword (property characteristic)
+    #[token("symmetric")]
+    Symmetric,
+    /// 'reflexive' keyword (property characteristic)
+    #[token("reflexive")]
+    Reflexive,
+    /// 'unit' keyword (unit declaration)
+    #[token("unitdef")]
+    Unit,
+    /// 'family' keyword (unit family declaration)
+    #[token("family")]
+    Family,
+    /// 'nominal' keyword (nominal/incommensurable unit declaration)
+    #[token("nominal")]
+    Nominal,
+    /// 'scale' keyword (unit scale factor)
+    #[token("scale")]
+    Scale,
 
     // Quantifier keywords
     /// 'all' quantifier
@@ -297,10 +412,12 @@ pub enum RawToken {
     /// 'none' quantifier
     #[token("none")]
     None,
-    /// 'at_least' quantifier
+    /// 'at least' quantifier / cardinality (underscore form kept as an alias)
+    #[token("at least")]
     #[token("at_least")]
     AtLeast,
-    /// 'at_most' quantifier
+    /// 'at most' quantifier / cardinality (underscore form kept as an alias)
+    #[token("at most")]
     #[token("at_most")]
     AtMost,
     /// 'exactly' quantifier
@@ -337,6 +454,18 @@ pub enum RawToken {
     /// 'boolean' type keyword
     #[token("boolean")]
     TBoolean,
+    /// 'date' type keyword
+    #[token("date")]
+    TDate,
+    /// 'date_time' type keyword
+    #[token("date_time")]
+    TDateTime,
+    /// 'time' type keyword
+    #[token("time")]
+    TTime,
+    /// 'duration' type keyword
+    #[token("duration")]
+    TDuration,
 
     // Boolean literals
     /// 'true' literal
@@ -356,6 +485,32 @@ pub enum RawToken {
     #[regex(r"[0-9][0-9_]*", parse_int)]
     Int(i64),
 
+    /// Temporal smart literal: `date(...)`, `time(...)`, `date_time(...)`,
+    /// `duration(...)`. The whole `keyword(content)` is slurped as one raw
+    /// token; `content` is handed verbatim to `dolfin-datetime`. Longest-match
+    /// beats the bare `date`/`time`/`duration` type keywords, which only match
+    /// when no `(` follows.
+    #[regex(r"(date_time|date|time|duration)\([^)\n]*\)", parse_temporal_lit)]
+    TemporalLit((TemporalKind, String)),
+
+    /// Physical-quantity smart literal: `quantity(42 km/h)`,
+    /// `quantity(10 N/m^2)`, `quantity(42 km/h as m/s)`. The whole
+    /// `quantity(content)` is slurped as one raw token; `content` is handed
+    /// verbatim to `dolfin-units`. The inner alternation allows one level of
+    /// nested parens so exponent forms like `m.s^(-2)` are captured whole.
+    /// A bare `quantity` with no `(` following lexes as a plain `Name`.
+    #[regex(r"quantity\((?:[^()\n]|\([^()\n]*\))*\)", parse_quantity_lit)]
+    QuantityLit(String),
+
+    /// `@locale d/m/y` file-level directive. The argument (everything up to a
+    /// trailing comment or end of line) is slurped raw and parsed later.
+    #[regex(r"@locale[ \t]+[^\n]*", parse_locale_directive, allow_greedy = true)]
+    LocaleDirective(String),
+
+    /// `@timezone Europe/Brussels` file-level directive.
+    #[regex(r"@timezone[ \t]+[^\n]*", parse_timezone_directive, allow_greedy = true)]
+    TimezoneDirective(String),
+
     /// String literal
     #[regex(r#""([^"\\]|\\.)*""#, parse_string)]
     String(String),
@@ -369,6 +524,10 @@ pub enum RawToken {
     /// Variable reference
     #[regex(r"\?[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_string())]
     Variable(String),
+
+    /// Prefixed name (alias:LocalName, no whitespace around colon)
+    #[regex(r"[a-zA-Z][a-zA-Z0-9_]*:[a-zA-Z][a-zA-Z0-9_]*", parse_prefixed_name, priority = 2)]
+    PrefixedName((String, String)),
 
     /// Identifier name
     #[regex(r"[a-zA-Z][a-zA-Z0-9_]*", |lex| lex.slice().to_string(), priority = 1)]
@@ -423,6 +582,9 @@ pub enum RawToken {
     /// Double caret (^^)
     #[token("^^")]
     DoubleCaret,
+    /// Hat / caret (^) — property path inverse prefix
+    #[token("^")]
+    Hat,
     /// Plus operator (+)
     #[token("+")]
     Plus,
@@ -446,6 +608,14 @@ pub enum RawToken {
 
     #[regex(r"[ \t]*#[^\n]*", allow_greedy = true)]
     Comment,
+}
+
+fn parse_prefixed_name(lex: &logos::Lexer<RawToken>) -> Option<(String, String)> {
+    let slice = lex.slice();
+    let mut parts = slice.splitn(2, ':');
+    let prefix = parts.next()?.to_string();
+    let local = parts.next()?.to_string();
+    Some((prefix, local))
 }
 
 fn parse_int(lex: &logos::Lexer<RawToken>) -> Option<i64> {
@@ -490,6 +660,51 @@ fn parse_string(lex: &logos::Lexer<RawToken>) -> Option<String> {
 fn parse_iri(lex: &logos::Lexer<RawToken>) -> Option<String> {
     let slice = lex.slice();
     Some(slice[1..slice.len() - 1].to_string())
+}
+
+/// Extract the argument of a `@directive <arg>` line, stripping the keyword and
+/// any trailing `# comment`.
+fn directive_arg(slice: &str, keyword: &str) -> Option<String> {
+    let arg = slice.strip_prefix(keyword)?.trim();
+    let arg = arg.split('#').next().unwrap_or(arg).trim();
+    if arg.is_empty() {
+        None
+    } else {
+        Some(arg.to_string())
+    }
+}
+
+fn parse_locale_directive(lex: &logos::Lexer<RawToken>) -> Option<String> {
+    directive_arg(lex.slice(), "@locale")
+}
+
+fn parse_timezone_directive(lex: &logos::Lexer<RawToken>) -> Option<String> {
+    directive_arg(lex.slice(), "@timezone")
+}
+
+/// Split a slurped `keyword(content)` temporal literal into its declared kind
+/// and the raw content between the parentheses.
+fn parse_temporal_lit(lex: &logos::Lexer<RawToken>) -> Option<(TemporalKind, String)> {
+    let slice = lex.slice();
+    let open = slice.find('(')?;
+    let kind = match &slice[..open] {
+        "date" => TemporalKind::Date,
+        "time" => TemporalKind::Time,
+        "date_time" => TemporalKind::DateTime,
+        "duration" => TemporalKind::Duration,
+        _ => return None,
+    };
+    let content = slice[open + 1..slice.len() - 1].trim().to_string();
+    Some((kind, content))
+}
+
+/// Split a slurped `quantity(content)` literal into its raw content, trimmed of
+/// the `quantity(` prefix and the trailing `)`. The content is handed verbatim
+/// to `dolfin-units`.
+fn parse_quantity_lit(lex: &logos::Lexer<RawToken>) -> Option<String> {
+    let slice = lex.slice();
+    let open = slice.find('(')?;
+    Some(slice[open + 1..slice.len() - 1].trim().to_string())
 }
 
 /// Spanned token
@@ -629,7 +844,21 @@ impl<'input> Lexer<'input> {
             RawToken::Key => Token::Key,
             RawToken::Is => Token::Is,
             RawToken::Fact => Token::Fact,
+            RawToken::Query => Token::Query,
+            RawToken::Return => Token::Return,
+            RawToken::Either => Token::Either,
+            RawToken::Or => Token::Or,
+            RawToken::GroupBy => Token::GroupBy,
             RawToken::IsInverse => Token::IsInverse,
+            RawToken::InverseOf => Token::InverseOf,
+            RawToken::EquivalentTo => Token::EquivalentTo,
+            RawToken::Unit => Token::Unit,
+                RawToken::Family => Token::Family,
+                RawToken::Nominal => Token::Nominal,
+                RawToken::Scale => Token::Scale,
+                RawToken::Transitive => Token::Transitive,
+            RawToken::Symmetric => Token::Symmetric,
+            RawToken::Reflexive => Token::Reflexive,
             RawToken::All => Token::All,
             RawToken::None => Token::None,
             RawToken::AtLeast => Token::AtLeast,
@@ -644,13 +873,22 @@ impl<'input> Lexer<'input> {
             RawToken::TInt => Token::TInt,
             RawToken::TFloat => Token::TFloat,
             RawToken::TBoolean => Token::TBoolean,
+            RawToken::TDate => Token::TDate,
+            RawToken::TDateTime => Token::TDateTime,
+            RawToken::TTime => Token::TTime,
+            RawToken::TDuration => Token::TDuration,
             RawToken::True => Token::Boolean(true),
             RawToken::False => Token::Boolean(false),
             RawToken::Int(n) => Token::Int(n),
             RawToken::Float(f) => Token::Float(f),
             RawToken::String(s) => Token::String(s),
             RawToken::Iri(s) => Token::Iri(s),
+            RawToken::TemporalLit(t) => Token::TemporalLit(t),
+            RawToken::QuantityLit(c) => Token::QuantityLit(c),
+            RawToken::LocaleDirective(a) => Token::LocaleDirective(a),
+            RawToken::TimezoneDirective(a) => Token::TimezoneDirective(a),
             RawToken::Variable(v) => Token::Variable(v),
+            RawToken::PrefixedName(p) => Token::PrefixedName(p),
             RawToken::Name(n) => Token::Name(n),
             RawToken::Arrow => Token::Arrow,
             RawToken::DoubleDot => Token::DoubleDot,
@@ -669,6 +907,7 @@ impl<'input> Lexer<'input> {
             RawToken::GreaterThan => Token::GreaterThan,
             RawToken::Newline(_) => Token::Newline,
             RawToken::DoubleCaret => Token::DoubleCaret,
+            RawToken::Hat => Token::Hat,
             RawToken::Plus => Token::Plus,
             RawToken::Minus => Token::Minus,
             RawToken::Slash => Token::Slash,
@@ -699,15 +938,17 @@ impl<'input> Lexer<'input> {
                         if stack.is_empty() {
                             new_pending_tokens.push_back((start, Token::Newline, end));
                             new_pending_tokens.push_back((nstart, Token::Dedent, nend));
-                        } else if let Some(last) = stack.pop_back() {
-                            let mut new = start;
-                            while new_pending_tokens.len() > last {
-                                if let Some((update_new, _, _)) = new_pending_tokens.pop_back()
-                                {
-                                    new = update_new;
+                        } else {
+                            if let Some(last) = stack.pop_back() {
+                                let mut new = start;
+                                while new_pending_tokens.len() > last {
+                                    if let Some((update_new, _, _)) = new_pending_tokens.pop_back()
+                                    {
+                                        new = update_new;
+                                    }
                                 }
+                                self.pending_tokens.push_front((new, Token::Newline, nend));
                             }
-                            self.pending_tokens.push_front((new, Token::Newline, nend));
                         }
                     }
                     Some(value) => {
@@ -765,7 +1006,9 @@ impl<'input> Lexer<'input> {
             .collect();
         self.compact_pending_tokens();
         peek_pending_tokens
-            .iter().filter(|&t| *t != Token::Newline && *t != Token::Indent && *t != Token::Dedent)
+            .iter()
+            .cloned()
+            .filter(|t| *t != Token::Newline && *t != Token::Indent && *t != Token::Dedent)
             .count()
             != 0
     }
@@ -777,10 +1020,11 @@ impl<'input> Lexer<'input> {
         }
 
         // Return pending tokens first
-        if self.should_emit_tokens()
-            && let Some(tok) = self.pending_tokens.pop_front() {
+        if self.should_emit_tokens() {
+            if let Some(tok) = self.pending_tokens.pop_front() {
                 return Some(Ok(tok));
             }
+        }
 
         if self.finished {
             return None;
@@ -845,8 +1089,22 @@ impl<'input> Lexer<'input> {
                                     .push_back((start_loc, Token::Newline, end_loc));
                             }
 
+                            // Comment-only lines must not affect indentation
+                            // tracking: their leading whitespace is whatever the
+                            // author happened to type, not a real block level.
+                            // Peek past this NEWLINE and skip the indent-stack
+                            // update if a Comment follows — the NEWLINE after the
+                            // comment (preceding the next real line) will supply
+                            // the indentation that actually matters.
+                            let next_is_comment = matches!(
+                                self.logos_lexer.clone().next(),
+                                Some(Ok(RawToken::Comment))
+                            );
+
                             // Emit indentation changes
-                            self.emit_indentation_tokens(new_indent, end_loc);
+                            if !next_is_comment {
+                                self.emit_indentation_tokens(new_indent, end_loc);
+                            }
 
                             self.at_line_start = true;
                             if !self.should_emit_tokens() {

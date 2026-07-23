@@ -15,7 +15,7 @@ use std::{cmp::Ordering, fmt};
 
 use crate::{
     OntologyFile,
-    macros::{impl_python, py_only},
+    macros::impl_python,
 };
 
 // ============================================================================
@@ -698,26 +698,6 @@ impl ParseResult {
     }
 }
 
-py_only! {
-    impl ParseResult {
-/// Get the ontology or raise a Python exception if parsing failed.
-fn unwrap_program(&self) -> PyResult<crate::ast::OntologyFile> {
-    match &self.ontology {
-        Some(p) => Ok(p.clone()),
-        None => {
-            let error_messages: Vec<String> =
-                self.errors().iter().map(|d| format!("{}", d)).collect();
-            Err(PyValueError::new_err(format!(
-                "Parsing failed with {} error(s):\n{}",
-                error_messages.len(),
-                error_messages.join("\n"),
-            )))
-        }
-    }
-}
-}
-}
-
 impl ParseResult {
     /// Create a successful result.
     pub fn success(ontology: crate::ast::OntologyFile, diagnostics: Vec<Diagnostic>) -> Self {
@@ -1321,6 +1301,8 @@ mod tests {
             iri_name: None,
             prefixes: vec![],
             declarations: vec![],
+            locale: None,
+            timezone: None,
             span: None,
         };
         let result = ParseResult::success(ontology, vec![]);

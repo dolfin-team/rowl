@@ -6,6 +6,7 @@ use lalrpop_util::lalrpop_mod;
 lalrpop_mod!(
     #[allow(clippy::all)]
     #[allow(dead_code)]
+    #[allow(unused_variables)]
     pub dolfin,
     "/dolfin.rs"
 );
@@ -436,8 +437,66 @@ concept Mammal:
         let result = parse_ontology(source);
         assert!(result.is_ok(), "Error: {:?}", result.errors());
         let onto = result.ontology.unwrap();
-        assert_eq!(onto.iri_name, Some("Mammifère".to_string()));
+        assert_eq!(onto.iri_name, Some(crate::ast::IriNameValue::LocalSegment("Mammifère".to_string())));
         assert_eq!(onto.declarations.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_unit_family() {
+        let source = "unitdef family vegetables\n";
+        let result = parse_ontology(source);
+        assert!(result.is_ok(), "Error: {:?}", result.errors());
+        let onto = result.ontology.unwrap();
+        assert_eq!(onto.declarations.len(), 1);
+        match &onto.declarations[0] {
+            crate::ast::Declaration::Unit(u) => {
+                assert_eq!(u.name.get().as_str(), "vegetables");
+                assert_eq!(u.kind, crate::ast::UnitKind::Family());
+            }
+            other => panic!("expected Declaration::Unit, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_unit_nominal() {
+        let source = "unitdef bunch_of_carrots: nominal of vegetables scale 2\n";
+        let result = parse_ontology(source);
+        assert!(result.is_ok(), "Error: {:?}", result.errors());
+        let onto = result.ontology.unwrap();
+        match &onto.declarations[0] {
+            crate::ast::Declaration::Unit(u) => {
+                assert_eq!(u.name.get().as_str(), "bunch_of_carrots");
+                match &u.kind {
+                    crate::ast::UnitKind::Nominal { family, scale } => {
+                        assert_eq!(family.full(), "vegetables");
+                        assert_eq!(*scale, 2.0);
+                    }
+                    other => panic!("expected Nominal, got {:?}", other),
+                }
+            }
+            other => panic!("expected Declaration::Unit, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_unit_derived() {
+        let source = "unitdef USD: scale 0.92 EUR\n";
+        let result = parse_ontology(source);
+        assert!(result.is_ok(), "Error: {:?}", result.errors());
+        let onto = result.ontology.unwrap();
+        match &onto.declarations[0] {
+            crate::ast::Declaration::Unit(u) => {
+                assert_eq!(u.name.get().as_str(), "USD");
+                match &u.kind {
+                    crate::ast::UnitKind::Derived { scale, reference } => {
+                        assert_eq!(*scale, 0.92);
+                        assert_eq!(reference, "EUR");
+                    }
+                    other => panic!("expected Derived, got {:?}", other),
+                }
+            }
+            other => panic!("expected Declaration::Unit, got {:?}", other),
+        }
     }
 
     #[test]
@@ -725,8 +784,7 @@ property worksFor: Employee -> Organization
         let result = ParseResult::failure(vec![
             DiagnosticBuilder::error(ErrorCode::UnexpectedToken, "bad token").build(),
         ]);
-        // Can't call unwrap_program directly in Rust (it needs Python),
-        // but we can check the fields:
+        // Failure result: no ontology, errors present.
         assert!(result.ontology.is_none());
         assert!(result.has_errors());
         assert!(!result.is_ok());
@@ -767,8 +825,8 @@ property worksFor: Employee -> Organization
         let fact = &onto.facts()[0];
         assert_eq!(fact.assertions.len(), 1);
         match &fact.assertions[0] {
-            crate::ast::FactAssertion::Property { name, values, .. } => {
-                assert_eq!(name, "owner");
+            crate::ast::FactAssertion::Property { property, values, .. } => {
+                assert_eq!(property.to_string(), "owner");
                 assert_eq!(values.len(), 1);
                 match &values[0] {
                     crate::ast::FactValue::Reference { qualifier, name, .. } => {
@@ -790,8 +848,8 @@ property worksFor: Employee -> Organization
         let onto = result.ontology.unwrap();
         let fact = &onto.facts()[0];
         match &fact.assertions[0] {
-            crate::ast::FactAssertion::Property { name, values, .. } => {
-                assert_eq!(name, "vaccination");
+            crate::ast::FactAssertion::Property { property, values, .. } => {
+                assert_eq!(property.to_string(), "vaccination");
                 assert_eq!(values.len(), 1);
                 match &values[0] {
                     crate::ast::FactValue::Block { assertions, .. } => {
@@ -825,6 +883,611 @@ property worksFor: Employee -> Organization
                 assert_eq!(property.full(), "spouse");
             }
             _ => panic!("Expected Inverse assertion"),
+        }
+    }
+
+    #[test]
+    fn test_parse_fact_type_hint_in_block() {
+        let source = "fact rex a Dog\n  vaccination [\n    a VaccinationRecord\n    name \"Davies\"\n  ]\n";
+        let result = parse_ontology(source);
+        assert!(result.is_ok(), "Parse error: {:?}", result.errors());
+        let onto = result.ontology.unwrap();
+        let fact = &onto.facts()[0];
+        match &fact.assertions[0] {
+            crate::ast::FactAssertion::Property { property, values, .. } => {
+                assert_eq!(property.to_string(), "vaccination");
+                match &values[0] {
+                    crate::ast::FactValue::Block { assertions, .. } => {
+                        assert!(
+                            assertions.iter().any(|a| matches!(a, crate::ast::FactAssertion::TypeHint { .. })),
+                            "expected TypeHint in block assertions"
+                        );
+                    }
+                    _ => panic!("expected Block value"),
+                }
+            }
+            _ => panic!("expected Property assertion"),
+        }
+    }
+
+    #[test]
+    fn test_parse_fact_multivalue_list() {
+        let source = "fact john a Person\n  phone \"555-1234\", \"555-5678\"\n";
+        let result = parse_ontology(source);
+        assert!(result.is_ok(), "Parse error: {:?}", result.errors());
+        let onto = result.ontology.unwrap();
+        let fact = &onto.facts()[0];
+        match &fact.assertions[0] {
+            crate::ast::FactAssertion::Property { property, values, .. } => {
+                assert_eq!(property.to_string(), "phone");
+                assert_eq!(values.len(), 2, "expected 2 values in comma-separated list");
+            }
+            _ => panic!("expected Property assertion"),
+        }
+    }
+
+    #[test]
+    fn test_parse_fact_bare() {
+        let source = "fact rex a Dog\n";
+        let result = parse_ontology(source);
+        assert!(result.is_ok(), "Parse error: {:?}", result.errors());
+        let onto = result.ontology.unwrap();
+        let fact = &onto.facts()[0];
+        assert_eq!(fact.id, "rex");
+        assert_eq!(fact.types.len(), 1);
+        assert!(fact.assertions.is_empty(), "bare fact should have no assertions");
+    }
+
+    #[test]
+    fn test_property_axioms_standalone() {
+        let source = r#"property loves: People -> People
+  symmetric
+  reflexive
+  sub friend_of
+"#;
+        let result = parse_ontology(source);
+        assert!(result.is_ok(), "Error: {:?}", result.errors());
+        let onto = result.ontology.unwrap();
+        let props = onto.properties();
+        assert_eq!(props.len(), 1);
+        let p = &props[0];
+        assert_eq!(p.axioms.len(), 3);
+        assert!(matches!(p.axioms[0], crate::ast::PropertyAxiom::Symmetric { .. }));
+        assert!(matches!(p.axioms[1], crate::ast::PropertyAxiom::Reflexive { .. }));
+        assert!(matches!(p.axioms[2], crate::ast::PropertyAxiom::Sub { .. }));
+    }
+
+    #[test]
+    fn test_property_axioms_in_has_declaration() {
+        let source = r#"concept Appointment:
+  has organizer: one People
+    inverse of organizes
+"#;
+        let result = parse_ontology(source);
+        assert!(result.is_ok(), "Error: {:?}", result.errors());
+        let onto = result.ontology.unwrap();
+        let concepts = onto.concepts();
+        assert_eq!(concepts.len(), 1);
+        let has = &concepts[0].has_declarations[0];
+        assert_eq!(has.axioms.len(), 1);
+        match &has.axioms[0] {
+            crate::ast::PropertyAxiom::InverseOf { property, .. } => {
+                assert_eq!(property.full(), "organizes");
+            }
+            _ => panic!("Expected InverseOf axiom"),
+        }
+    }
+
+    #[test]
+    fn test_property_axioms_transitive_equivalent() {
+        let source = r#"property friend_of: People -> People
+  transitive
+  equivalent to knows
+"#;
+        let result = parse_ontology(source);
+        assert!(result.is_ok(), "Error: {:?}", result.errors());
+        let onto = result.ontology.unwrap();
+        let props = onto.properties();
+        assert_eq!(props[0].axioms.len(), 2);
+        assert!(matches!(props[0].axioms[0], crate::ast::PropertyAxiom::Transitive { .. }));
+        match &props[0].axioms[1] {
+            crate::ast::PropertyAxiom::EquivalentTo { path, .. } => {
+                match path {
+                    crate::ast::PropertyPath::Name { name, .. } => assert_eq!(name.full(), "knows"),
+                    _ => panic!("Expected simple name path"),
+                }
+            }
+            _ => panic!("Expected EquivalentTo axiom"),
+        }
+    }
+
+    #[test]
+    fn test_property_path_sequence() {
+        let source = r#"property grand_parent: Human -> Human
+  equivalent to (parent / parent)
+"#;
+        let result = parse_ontology(source);
+        assert!(result.is_ok(), "Error: {:?}", result.errors());
+        let onto = result.ontology.unwrap();
+        let p = &onto.properties()[0];
+        match &p.axioms[0] {
+            crate::ast::PropertyAxiom::EquivalentTo { path, .. } => {
+                assert!(matches!(path, crate::ast::PropertyPath::Sequence { steps, .. } if steps.len() == 2));
+            }
+            _ => panic!("Expected EquivalentTo"),
+        }
+    }
+
+    #[test]
+    fn test_property_path_inverse_in_sequence() {
+        let source = r#"property sibling: Human -> Human
+  equivalent to (parent / ^parent)
+"#;
+        let result = parse_ontology(source);
+        assert!(result.is_ok(), "Error: {:?}", result.errors());
+        let onto = result.ontology.unwrap();
+        match &onto.properties()[0].axioms[0] {
+            crate::ast::PropertyAxiom::EquivalentTo { path, .. } => {
+                match path {
+                    crate::ast::PropertyPath::Sequence { steps, .. } => {
+                        assert_eq!(steps.len(), 2);
+                        assert!(matches!(&steps[1], crate::ast::PropertyPath::Inverse { .. }));
+                    }
+                    _ => panic!("Expected sequence"),
+                }
+            }
+            _ => panic!("Expected EquivalentTo"),
+        }
+    }
+
+    #[test]
+    fn test_property_path_one_or_more() {
+        let source = r#"property ancestor: Human -> Human
+  equivalent to parent+
+"#;
+        let result = parse_ontology(source);
+        assert!(result.is_ok(), "Error: {:?}", result.errors());
+        let onto = result.ontology.unwrap();
+        match &onto.properties()[0].axioms[0] {
+            crate::ast::PropertyAxiom::EquivalentTo { path, .. } => {
+                assert!(matches!(path, crate::ast::PropertyPath::OneOrMore { .. }));
+            }
+            _ => panic!("Expected EquivalentTo"),
+        }
+    }
+
+    #[test]
+    fn test_parse_prefixed_name_in_type_ref() {
+        let source = r#"prefix people.Person as P
+
+concept Employee:
+  sub P:Person
+  has manager: P:Person
+"#;
+        let result = parse_ontology(source);
+        assert!(result.is_ok(), "Error: {:?}", result.errors());
+        let onto = result.ontology.unwrap();
+        let concept = &onto.concepts()[0];
+        // sub P:Person → parents: [TypeRef::Named { name: ["P", "Person"] }]
+        assert_eq!(concept.parents.len(), 1);
+        match &concept.parents[0] {
+            crate::ast::TypeRef::Named { name, .. } => assert_eq!(name.parts, vec!["P", "Person"]),
+            _ => panic!("expected Named TypeRef"),
+        }
+    }
+
+    #[test]
+    fn test_parse_uri_prefix_with_prefixed_name_sub() {
+        let source = r#"prefix <http://example.com/onto/> as ee
+
+concept Machin:
+  sub ee:Truc
+"#;
+        let result = parse_ontology(source);
+        assert!(result.is_ok(), "parse errors: {:?}", result.errors());
+        let onto = result.ontology.unwrap();
+
+        // Prefix declaration: path is a URI literal, alias is "ee"
+        assert_eq!(onto.prefixes.len(), 1);
+        let prefix = &onto.prefixes[0];
+        assert_eq!(prefix.alias, "ee");
+        assert_eq!(prefix.path.parts, vec!["http://example.com/onto/"]);
+        assert!(!prefix.path.is_prefixed);
+
+        // sub ee:Truc → TypeRef::Named with is_prefixed=true, parts=["ee","Truc"]
+        let concept = &onto.concepts()[0];
+        assert_eq!(concept.parents.len(), 1);
+        match &concept.parents[0] {
+            crate::ast::TypeRef::Named { name, .. } => {
+                assert_eq!(name.parts, vec!["ee", "Truc"]);
+                assert!(name.is_prefixed, "ee:Truc should have is_prefixed=true");
+            }
+            _ => panic!("expected Named TypeRef"),
+        }
+    }
+
+    #[test]
+    fn test_example_queries_file_parses() {
+        let src = include_str!("../../public/examples/happypaws/queries.dlf");
+        let result = parse_ontology(src);
+        assert!(result.is_ok(), "queries.dlf failed: {:?}", result.errors());
+        let onto = result.ontology.unwrap();
+        assert_eq!(onto.queries().len(), 3, "expected 3 queries");
+        assert_eq!(onto.rules().len(), 2, "expected 2 rules");
+    }
+
+    // ── §13 Query language parse tests ─────────────────────────────────────
+
+    #[test]
+    fn test_query_13_1_simple_typed_subject() {
+        let src = concat!(
+            "query movies_released_year:\n",
+            "  a ex:Movie\n",
+            "    ex:title ?title\n",
+            "    ex:year ?year\n",
+            "    ex:rating ?rating\n",
+        );
+        let result = parse_ontology(src);
+        assert!(result.is_ok(), "§13.1 parse error: {:?}", result.errors());
+        let onto = result.ontology.unwrap();
+        let q = &onto.queries()[0];
+        assert_eq!(q.name, "movies_released_year");
+        assert_eq!(q.body.clauses.len(), 1);
+        match &q.body.clauses[0] {
+            crate::ast::QueryClause::SubjectPattern(sp) => {
+                assert!(sp.subject.is_none());
+                assert!(sp.type_ref.is_some());
+                assert_eq!(sp.properties.len(), 3);
+            }
+            other => panic!("expected SubjectPattern, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_query_13_2_inline_filters() {
+        let src = concat!(
+            "query good_movies_after_2010:\n",
+            "  a ex:Movie\n",
+            "    ex:title ?title\n",
+            "    ex:year [?year > 2010]\n",
+            "    ex:rating [?rating > 7.5]\n",
+        );
+        let result = parse_ontology(src);
+        assert!(result.is_ok(), "§13.2 parse error: {:?}", result.errors());
+        let onto = result.ontology.unwrap();
+        let q = &onto.queries()[0];
+        assert_eq!(q.name, "good_movies_after_2010");
+        assert_eq!(q.body.clauses.len(), 1);
+        match &q.body.clauses[0] {
+            crate::ast::QueryClause::SubjectPattern(sp) => {
+                assert_eq!(sp.properties.len(), 3);
+                match &sp.properties[1] {
+                    crate::ast::PropertyPattern::Constrained { block, .. } => {
+                        assert_eq!(block.constraints.len(), 1);
+                        match &block.constraints[0] {
+                            crate::ast::Constraint::Comparison { binding, .. } => {
+                                assert!(binding.is_some());
+                            }
+                            other => panic!("expected Comparison constraint, got {:?}", other),
+                        }
+                    }
+                    other => panic!("expected Constrained property, got {:?}", other),
+                }
+            }
+            other => panic!("expected SubjectPattern, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_query_13_3_return_with_order() {
+        let src = concat!(
+            "query sorted_movies:\n",
+            "  a ex:Movie\n",
+            "    ex:title ?title\n",
+            "    ex:rating ?rating\n",
+            "  return\n",
+            "    title ?title\n",
+            "    rating ?rating\n",
+            "      order desc\n",
+        );
+        let result = parse_ontology(src);
+        assert!(result.is_ok(), "§13.3 parse error: {:?}", result.errors());
+        let onto = result.ontology.unwrap();
+        let q = &onto.queries()[0];
+        assert_eq!(q.name, "sorted_movies");
+        let ret = q.body.return_block.as_ref().expect("return block");
+        assert_eq!(ret.columns.len(), 2);
+        assert_eq!(ret.columns[0].alias.as_deref(), Some("title"));
+        assert_eq!(ret.columns[1].order, Some(crate::ast::OrderDir::Desc));
+    }
+
+    #[test]
+    fn test_query_13_4_return_with_limit() {
+        let src = concat!(
+            "query top_10_movies:\n",
+            "  a ex:Movie\n",
+            "    ex:title ?title\n",
+            "    ex:rating ?rating\n",
+            "  return\n",
+            "    ?title\n",
+            "    ?rating\n",
+            "      order desc\n",
+            "    limit 10\n",
+        );
+        let result = parse_ontology(src);
+        assert!(result.is_ok(), "§13.4 parse error: {:?}", result.errors());
+        let onto = result.ontology.unwrap();
+        let q = &onto.queries()[0];
+        let ret = q.body.return_block.as_ref().expect("return block");
+        assert_eq!(ret.columns.len(), 2);
+        assert_eq!(ret.limit, Some(10));
+    }
+
+    #[test]
+    fn test_query_13_5_nested_subject_block_with_optional() {
+        // spec uses @optional; implementation uses bare `optional`
+        let src = concat!(
+            "query directors_with_name_and_year:\n",
+            "  ?_ ex:director [\n",
+            "    ex:name ?directorName\n",
+            "    optional ex:birthYear ?birthYear\n",
+            "  ]\n",
+        );
+        let result = parse_ontology(src);
+        assert!(result.is_ok(), "§13.5 parse error: {:?}", result.errors());
+        let onto = result.ontology.unwrap();
+        let q = &onto.queries()[0];
+        assert_eq!(q.name, "directors_with_name_and_year");
+        assert_eq!(q.body.clauses.len(), 1);
+        match &q.body.clauses[0] {
+            crate::ast::QueryClause::SubjectPattern(sp) => {
+                assert_eq!(sp.properties.len(), 1);
+                match &sp.properties[0] {
+                    crate::ast::PropertyPattern::Nested { block, .. } => {
+                        assert_eq!(block.properties.len(), 2);
+                        match &block.properties[1] {
+                            crate::ast::PropertyPattern::Optional { .. } => {}
+                            other => panic!("expected Optional, got {:?}", other),
+                        }
+                    }
+                    other => panic!("expected Nested, got {:?}", other),
+                }
+            }
+            other => panic!("expected SubjectPattern, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_query_13_6_distinct() {
+        let src = concat!(
+            "query distinct_genres:\n",
+            "  a ex:Movie\n",
+            "    ex:genre ?genre\n",
+            "  return\n",
+            "    ?genre\n",
+            "      distinct\n",
+        );
+        let result = parse_ontology(src);
+        assert!(result.is_ok(), "§13.6 parse error: {:?}", result.errors());
+        let onto = result.ontology.unwrap();
+        let q = &onto.queries()[0];
+        let ret = q.body.return_block.as_ref().expect("return block");
+        assert_eq!(ret.columns.len(), 1);
+        assert!(ret.columns[0].distinct);
+    }
+
+    #[test]
+    fn test_query_13_7_existence_and_inverse() {
+        let src = concat!(
+            "query directors_not_horror:\n",
+            "  ?director a ex:Director\n",
+            "    ex:name ?name\n",
+            "  some:\n",
+            "    is ex:director of ?_movie\n",
+            "  none:\n",
+            "    ?director is ex:director of [ex:genre \"Horror\"]\n",
+            "  return\n",
+            "    ?director\n",
+            "    ?name\n",
+        );
+        let result = parse_ontology(src);
+        assert!(result.is_ok(), "§13.7 parse error: {:?}", result.errors());
+        let onto = result.ontology.unwrap();
+        let q = &onto.queries()[0];
+        assert_eq!(q.name, "directors_not_horror");
+        // clauses: SubjectPattern, ExistenceBlock(negated=false), ExistenceBlock(negated=true)
+        assert_eq!(q.body.clauses.len(), 3);
+        match &q.body.clauses[1] {
+            crate::ast::QueryClause::ExistenceBlock(eb) => assert!(!eb.negated),
+            other => panic!("expected ExistenceBlock(some), got {:?}", other),
+        }
+        match &q.body.clauses[2] {
+            crate::ast::QueryClause::ExistenceBlock(eb) => assert!(eb.negated),
+            other => panic!("expected ExistenceBlock(none), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_query_13_8_group_by_aggregation() {
+        let src = concat!(
+            "query movies_per_genre_count:\n",
+            "  ?movie a ex:Movie\n",
+            "    ex:genre ?genre\n",
+            "  group by ?genre\n",
+            "    count ?movie as ?movieCount\n",
+            "  return\n",
+            "    ?genre\n",
+            "    ?movieCount\n",
+        );
+        let result = parse_ontology(src);
+        assert!(result.is_ok(), "§13.8 parse error: {:?}", result.errors());
+        let onto = result.ontology.unwrap();
+        let q = &onto.queries()[0];
+        let gb = q.body.group_by.as_ref().expect("group_by block");
+        assert_eq!(gb.var, "?genre");
+        assert_eq!(gb.specs.len(), 1);
+        assert_eq!(gb.specs[0].kind, crate::ast::AggKind::Count);
+    }
+
+    #[test]
+    fn test_query_13_9_group_by_having() {
+        let src = concat!(
+            "query popular_genres:\n",
+            "  ?movie a ex:Movie\n",
+            "    ex:genre ?genre\n",
+            "    ex:rating ?rating\n",
+            "  group by ?genre\n",
+            "    count ?movie as ?movieCount\n",
+            "    average ?rating as ?avgRating\n",
+            "    ?movieCount >= 10\n",
+            "    ?avgRating > 7.0\n",
+            "  return\n",
+            "    ?genre\n",
+            "    ?movieCount\n",
+            "    ?avgRating\n",
+        );
+        let result = parse_ontology(src);
+        assert!(result.is_ok(), "§13.9 parse error: {:?}", result.errors());
+        let onto = result.ontology.unwrap();
+        let q = &onto.queries()[0];
+        let gb = q.body.group_by.as_ref().expect("group_by block");
+        assert_eq!(gb.specs.len(), 2);
+        assert_eq!(gb.having.len(), 2);
+    }
+
+    #[test]
+    fn test_query_13_10_body_level_aggregation() {
+        let src = concat!(
+            "query average_per_director:\n",
+            "  ?director is ex:director of ?_\n",
+            "  average ?rating as ?directorAvg\n",
+            "    ?director is ex:director of [ex:rating ?rating]\n",
+            "\n",
+            "query global_average:\n",
+            "  average ?_r as ?globalAvg\n",
+            "    ?_r is ex:rating of [a ex:Movie]\n",
+            "\n",
+            "query above_average_directors:\n",
+            "  average_per_director as [\n",
+            "    director ?director\n",
+            "    directorAvg ?directorAvg\n",
+            "  ]\n",
+            "  global_average as ?globalAvg\n",
+            "  ?directorAvg > ?globalAvg\n",
+            "  ?director ex:name ?directorName\n",
+            "  return\n",
+            "    ?directorName\n",
+            "    ?directorAvg\n",
+            "      order desc\n",
+            "    ?globalAvg\n",
+        );
+        let result = parse_ontology(src);
+        assert!(result.is_ok(), "§13.10 parse error: {:?}", result.errors());
+        let onto = result.ontology.unwrap();
+        assert_eq!(onto.queries().len(), 3);
+        let q0 = &onto.queries()[0];
+        assert_eq!(q0.name, "average_per_director");
+        // clause 0: SubjectPattern (inverse), clause 1: AggregationQuery
+        assert_eq!(q0.body.clauses.len(), 2);
+        match &q0.body.clauses[1] {
+            crate::ast::QueryClause::AggregationQuery(aq) => {
+                assert_eq!(aq.kind, crate::ast::AggKind::Average);
+                assert_eq!(aq.result_var, "?directorAvg");
+            }
+            other => panic!("expected AggregationQuery, got {:?}", other),
+        }
+        let q2 = &onto.queries()[2];
+        assert_eq!(q2.name, "above_average_directors");
+        // Composition(Named), Composition(Scalar), BoolFilter, SubjectPattern
+        assert_eq!(q2.body.clauses.len(), 4);
+    }
+
+    #[test]
+    fn test_query_13_11_combined() {
+        let src = concat!(
+            "query movie_count_avg_rating_per_director:\n",
+            "  ?movie ex:director ?director\n",
+            "    ex:releaseYear [?year > 2000]\n",
+            "    ex:rating ?rating\n",
+            "  group by ?director\n",
+            "    count ?movie as ?movieCount\n",
+            "    average ?rating as ?avgRating\n",
+            "    ?movieCount >= 3\n",
+            "    ?avgRating > 7.5\n",
+            "  return\n",
+            "    ?director\n",
+            "    ?movieCount\n",
+            "    ?avgRating\n",
+            "\n",
+            "query combine_everything:\n",
+            "  movie_count_avg_rating_per_director as [\n",
+            "    director ?director\n",
+            "    movieCount ?movieCount\n",
+            "    avgRating ?avgRating\n",
+            "  ]\n",
+            "  ?director ex:name ?directorName\n",
+            "  some:\n",
+            "    ?director is ex:director of [ex:won ?_award]\n",
+            "  none:\n",
+            "    ?director is ex:director of [ex:genre \"Horror\"]\n",
+            "  return\n",
+            "    ?directorName\n",
+            "    ?movieCount\n",
+            "    ?avgRating\n",
+        );
+        let result = parse_ontology(src);
+        assert!(result.is_ok(), "§13.11 parse error: {:?}", result.errors());
+        let onto = result.ontology.unwrap();
+        assert_eq!(onto.queries().len(), 2);
+        let q0 = &onto.queries()[0];
+        // inline value + continuation block: one SubjectPattern with 3 properties
+        assert_eq!(q0.body.clauses.len(), 1);
+        match &q0.body.clauses[0] {
+            crate::ast::QueryClause::SubjectPattern(sp) => {
+                assert_eq!(sp.properties.len(), 3);
+            }
+            other => panic!("expected SubjectPattern, got {:?}", other),
+        }
+        let gb = q0.body.group_by.as_ref().expect("group_by");
+        assert_eq!(gb.specs.len(), 2);
+        assert_eq!(gb.having.len(), 2);
+        let q1 = &onto.queries()[1];
+        // Composition(Named), SubjectPattern, ExistenceBlock(some), ExistenceBlock(none)
+        assert_eq!(q1.body.clauses.len(), 4);
+    }
+
+    #[test]
+    fn test_parse_query_call_in_rule() {
+        let source = concat!(
+            "rule use_query:\n",
+            "  match:\n",
+            "    ?x a Cat\n",
+            "    find_at_risk\n",
+            "      ?x\n",
+            "      ?vet=people.Marcel\n",
+            "  then:\n",
+            "    ?x a RiskyAnimal\n",
+        );
+        let result = parse_ontology(source);
+        assert!(result.is_ok(), "Parse error: {:?}", result.errors());
+        let onto = result.ontology.unwrap();
+        assert_eq!(onto.rules().len(), 1);
+        let rule = &onto.rules()[0];
+        assert_eq!(rule.match_block.patterns.len(), 2);
+        match &rule.match_block.patterns[1] {
+            crate::ast::Pattern::QueryCall { name, args, .. } => {
+                assert_eq!(name.last(), "find_at_risk");
+                assert_eq!(args.len(), 2);
+                match &args[0] {
+                    crate::ast::QueryArg::Var { name, .. } => assert_eq!(name, "?x"),
+                    _ => panic!("expected Var arg"),
+                }
+                match &args[1] {
+                    crate::ast::QueryArg::Binding { param, .. } => assert_eq!(param, "?vet"),
+                    _ => panic!("expected Binding arg"),
+                }
+            }
+            _ => panic!("expected QueryCall pattern"),
         }
     }
 }

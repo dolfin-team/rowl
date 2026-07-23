@@ -110,6 +110,13 @@ macro_rules! impl_python {
             )*
         }
     ) => {
+        // These impl blocks mix Rust-used helpers with python-only getters. The
+        // getters are reachable only via the (absent) pymethods bindings, so
+        // they read as dead code without the feature. Per-method gating is
+        // impossible here — the macro can't tell which are python-only, and
+        // wrapping pyo3's `#[getter]`/`#[new]` in `cfg_attr` breaks `#[pymethods]`.
+        // Scope the allow to this branch only; under `python` they are live.
+        #[allow(dead_code)]
         impl $type {
             $(
                 $vis fn $name( $($params)* ) $(-> $ret)? $body

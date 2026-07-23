@@ -5,7 +5,7 @@
 
 use crate::ast::*;
 use crate::lexer::Token;
-use crate::error::{LexerError, Location, Span, SpannedString};
+use crate::error::{ErrorCode, LexerError, Location, Span, SpannedString};
 
 grammar;
 
@@ -27,6 +27,11 @@ extern {
         "property" => Token::Property,
         "one of" => Token::OneOf,
         "rule" => Token::Rule,
+        "query" => Token::Query,
+        "return" => Token::Return,
+        "either" => Token::Either,
+        "or" => Token::Or,
+        "group by" => Token::GroupBy,
         "match" => Token::Match,
         "then" => Token::Then,
         "sub" => Token::Sub,
@@ -35,6 +40,16 @@ extern {
         "a" => Token::Is,
         "fact" => Token::Fact,
         "is" => Token::IsInverse,
+        "^" => Token::Hat,
+        "inverse of" => Token::InverseOf,
+        "equivalent to" => Token::EquivalentTo,
+        "transitive" => Token::Transitive,
+        "symmetric" => Token::Symmetric,
+        "reflexive" => Token::Reflexive,
+        "unitdef" => Token::Unit,
+        "family" => Token::Family,
+        "nominal" => Token::Nominal,
+        "scale" => Token::Scale,
 
         // Quantifier keywords
         "all" => Token::All,
@@ -56,7 +71,11 @@ extern {
         "int" => Token::TInt,
         "float" => Token::TFloat,
         "boolean" => Token::TBoolean,
-        
+        "date" => Token::TDate,
+        "date_time" => Token::TDateTime,
+        "time" => Token::TTime,
+        "duration" => Token::TDuration,
+
         // Literals
         INT => Token::Int(<i64>),
         FLOAT => Token::Float(<f64>),
@@ -65,8 +84,13 @@ extern {
         IRI => Token::Iri(<String>),
         
         // Identifiers
+        PREFIXED_NAME => Token::PrefixedName(<(String, String)>),
         NAME => Token::Name(<String>),
         VARIABLE => Token::Variable(<String>),
+        TEMPORAL_LIT => Token::TemporalLit(<(TemporalKind, String)>),
+        QUANTITY_LIT => Token::QuantityLit(<String>),
+        LOCALE_DIRECTIVE => Token::LocaleDirective(<String>),
+        TIMEZONE_DIRECTIVE => Token::TimezoneDirective(<String>),
         
         // Punctuation
         ":" => Token::Colon,
@@ -133,15 +157,31 @@ pub OntologyFile: OntologyFile = {
     NEWLINE*
     <start:@L>
     <iri_name:IriNameAnnotation?>
-    <prefixes:PrefixStmt*>
+    <items:HeaderItem*>
     // NEWLINE*
     <declarations:Declaration*>
-    EOF <end:@R> => OntologyFile::new(
-        iri_name, 
-        prefixes.into_iter().flatten().collect(), 
-        declarations,
-        Some(Span { start, end }),
-    ),
+    EOF <end:@R> => {
+        // Prefixes and directives may interleave freely; last directive of each
+        // kind wins.
+        let mut prefixes = Vec::new();
+        let mut locale = None;
+        let mut timezone = None;
+        for item in items {
+            match item {
+                HeaderItem::Prefixes(p) => prefixes.extend(p),
+                HeaderItem::Locale(a) => locale = Some(a),
+                HeaderItem::Timezone(a) => timezone = Some(a),
+            }
+        }
+        OntologyFile {
+            iri_name,
+            prefixes,
+            declarations,
+            locale,
+            timezone,
+            span: Some(Span { start, end }),
+        }
+    },
 };
 
 
@@ -231,9 +271,19 @@ PrefixTarget: Vec<PrefixDecl> = {
 // ANNOTATIONS
 // ============================================================================
 
-/// IRI name annotation to override the derived IRI segment
-IriNameAnnotation: String = {
-    "@iri_name" <name:STRING> NEWLINE+ => name,
+/// IRI name annotation to override the derived IRI segment or concept IRI
+IriNameAnnotation: IriNameValue = {
+    "@iri_name" <name:STRING> NEWLINE+ => IriNameValue::LocalSegment(name),
+    "@iri_name" <iri:IRI> NEWLINE+ => IriNameValue::AbsoluteUri(iri),
+};
+
+/// A file-header item: a prefix statement or a `@locale`/`@timezone` directive.
+/// Collecting these in one repetition lets prefixes and directives appear in
+/// any order at the top of the file without an LR ambiguity.
+HeaderItem: HeaderItem = {
+    <p:PrefixStmt> => HeaderItem::Prefixes(p),
+    <a:LOCALE_DIRECTIVE> NEWLINE+ => HeaderItem::Locale(a),
+    <a:TIMEZONE_DIRECTIVE> NEWLINE+ => HeaderItem::Timezone(a),
 };
 
 // ============================================================================
@@ -246,6 +296,37 @@ Declaration: Declaration = {
     <p:PropertyDef> NEWLINE? => Declaration::Property(p),
     <r:RuleDef> NEWLINE? => Declaration::Rule(r),
     <f:FactDef> NEWLINE? => Declaration::Fact(f),
+    <q:QueryDef> NEWLINE? => Declaration::Query(q),
+    <u:UnitDef> NEWLINE? => Declaration::Unit(u),
+};
+
+// ============================================================================
+// UNIT
+// ============================================================================
+
+// A number usable as a unit scale factor: accepts both `2` and `0.92`.
+Num: f64 = {
+    INT => <> as f64,
+    FLOAT => <>,
+};
+
+// Keyword is `unitdef`, not `unit` — `unit` is already an established,
+// widely-used ordinary identifier (e.g. the `unit.Mass` qualified-name
+// convention in docs/src/code/units.dlf), so it can't be reserved without
+// breaking that existing usage.
+UnitDef: UnitDef = {
+    // `unitdef family vegetables`
+    <start:@L> "unitdef" "family" <ns:@L> <name:NAME> <ne:@R> <end:@R> NEWLINE => {
+        UnitDef { name: SpannedString::new(name, Some(Span { start: ns, end: ne })), kind: UnitKind::Family(), span: Some(Span { start, end }) }
+    },
+    // `unitdef bunch_of_carrots: nominal of vegetables scale 2`
+    <start:@L> "unitdef" <ns:@L> <name:NAME> <ne:@R> ":" "nominal" "of" <family:QualifiedName> "scale" <scale:Num> <end:@R> NEWLINE => {
+        UnitDef { name: SpannedString::new(name, Some(Span { start: ns, end: ne })), kind: UnitKind::Nominal { family, scale }, span: Some(Span { start, end }) }
+    },
+    // `unitdef USD: scale 0.92 EUR`
+    <start:@L> "unitdef" <ns:@L> <name:NAME> <ne:@R> ":" "scale" <scale:Num> <reference:NAME> <end:@R> NEWLINE => {
+        UnitDef { name: SpannedString::new(name, Some(Span { start: ns, end: ne })), kind: UnitKind::Derived { scale, reference }, span: Some(Span { start, end }) }
+    },
 };
 
 
@@ -254,7 +335,7 @@ Declaration: Declaration = {
 // ============================================================================
 
 ConceptDef: ConceptDef = {
-    <start:@L> "concept" <ns:@L> <name:NAME> <ne:@R> ":" NEWLINE
+    <start:@L> "concept" <ns:@L> <name:NAME> <ne:@R> ":"? NEWLINE
     INDENT
     <end:@R>
     <members:ConceptMember+>
@@ -264,6 +345,7 @@ ConceptDef: ConceptDef = {
         let mut span = Span { start, end };
 
         let mut one_of: Option<Vec<OneOfVariant>> = None;
+        let mut iri_name: Option<IriNameValue> = None;
 
         for (member, mspan) in members {
             match member {
@@ -280,10 +362,16 @@ ConceptDef: ConceptDef = {
                     span = span.merge(&mspan);
                     one_of = Some(variants);
                 },
+                ConceptMember::IriName(val) => {
+                    span = span.merge(&mspan);
+                    iri_name = Some(val);
+                },
             }
         }
 
-        ConceptDef::new(name, parents, has_declarations, one_of, Some(span), Some(Span { start: ns, end: ne }))
+        let mut concept = ConceptDef::new(name, parents, has_declarations, one_of, Some(span), Some(Span { start: ns, end: ne }));
+        concept.iri_name = iri_name;
+        concept
     },
     // Concept without body (just declaration)
     <start:@L> "concept" <ns:@L> <name:NAME> <ne:@R> <end:@R> NEWLINE => ConceptDef::new(name, vec![], vec![], None, Some(Span { start, end }), Some(Span { start: ns, end: ne })),
@@ -293,6 +381,7 @@ ConceptMember: (ConceptMember, Span) = {
     <s:SubDeclaration> => (ConceptMember::Sub(s.0), s.1),
     <h:HasDeclaration> => (ConceptMember::Has(h.clone()), h.span.unwrap()),
     <oo:OneOfBlock> => (ConceptMember::OneOf(oo.0), oo.1),
+    <start:@L> "@iri_name" <iri:IRI> NEWLINE+ <end:@R> => (ConceptMember::IriName(IriNameValue::AbsoluteUri(iri)), Span { start, end }),
 };
 
 OneOfBlock: (Vec<OneOfVariant>, Span) = {
@@ -325,30 +414,474 @@ SubDeclaration: (Vec<TypeRef>, Span) = {
 };
 
 HasDeclaration: HasDeclaration = {
+    <start:@L> "has" <is_key:("key")?> <name:NAME> ":" <cardinality:Optional<Cardinality>> <type_ref:TypeRef> <end:@R> NEWLINE
+    INDENT <axioms:PropertyAxiom+> DEDENT => {
+        HasDeclaration { name, is_key: is_key.is_some(), cardinality, type_ref, axioms, span: Some(Span { start, end }) }
+    },
     <start:@L> "has" <is_key:("key")?> <name:NAME> ":" <cardinality:Optional<Cardinality>> <type_ref:TypeRef> <end:@R> NEWLINE => {
-        HasDeclaration { name, is_key: is_key.is_some(), cardinality, type_ref, span: Some(Span { start, end }) }
-    }
+        HasDeclaration { name, is_key: is_key.is_some(), cardinality, type_ref, axioms: vec![], span: Some(Span { start, end }) }
+    },
 };
 
 // ============================================================================
 // PROPERTY
 // ============================================================================
 
+PropertyAxiom: PropertyAxiom = {
+    <start:@L> "sub" <property:QualifiedName> <end:@R> NEWLINE
+        => PropertyAxiom::Sub { property, span: Some(Span { start, end }) },
+    <start:@L> "inverse of" <property:QualifiedName> <end:@R> NEWLINE
+        => PropertyAxiom::InverseOf { property, span: Some(Span { start, end }) },
+    <start:@L> "transitive" <end:@R> NEWLINE
+        => PropertyAxiom::Transitive { span: Some(Span { start, end }) },
+    <start:@L> "symmetric" <end:@R> NEWLINE
+        => PropertyAxiom::Symmetric { span: Some(Span { start, end }) },
+    <start:@L> "reflexive" <end:@R> NEWLINE
+        => PropertyAxiom::Reflexive { span: Some(Span { start, end }) },
+    <start:@L> "equivalent to" <path:PropertyPath> <end:@R> NEWLINE
+        => PropertyAxiom::EquivalentTo { path, span: Some(Span { start, end }) },
+};
+
+// ============================================================================
+// PROPERTY PATH EXPRESSIONS  (for "equivalent to")
+// ============================================================================
+
+PropertyPath: PropertyPath = {
+    <PropertyPathAlt>
+};
+
+PropertyPathAlt: PropertyPath = {
+    <start:@L> <l:PropertyPathSeq> "|" <r:PropertyPathAlt> <end:@R>
+        => PropertyPath::Alt { left: Box::new(l), right: Box::new(r), span: Some(Span { start, end }) },
+    <PropertyPathSeq>,
+};
+
+PropertyPathSeq: PropertyPath = {
+    <start:@L> <l:PropertyPathSeq> "/" <r:PropertyPathMod> <end:@R> => {
+        match l {
+            PropertyPath::Sequence { mut steps, .. } => {
+                steps.push(r);
+                PropertyPath::Sequence { steps, span: Some(Span { start, end }) }
+            }
+            other => PropertyPath::Sequence { steps: vec![other, r], span: Some(Span { start, end }) },
+        }
+    },
+    <PropertyPathMod>,
+};
+
+PropertyPathMod: PropertyPath = {
+    <start:@L> <p:PropertyPathAtom> "+" <end:@R>
+        => PropertyPath::OneOrMore { inner: Box::new(p), span: Some(Span { start, end }) },
+    <start:@L> <p:PropertyPathAtom> "*" <end:@R>
+        => PropertyPath::ZeroOrMore { inner: Box::new(p), span: Some(Span { start, end }) },
+    <PropertyPathAtom>,
+};
+
+PropertyPathAtom: PropertyPath = {
+    <start:@L> "^" <p:PropertyPathAtom> <end:@R>
+        => PropertyPath::Inverse { inner: Box::new(p), span: Some(Span { start, end }) },
+    <start:@L> <n:QualifiedName> <end:@R>
+        => PropertyPath::Name { name: n, span: Some(Span { start, end }) },
+    "(" <p:PropertyPath> ")" => p,
+};
+
 PropertyDef: PropertyDef = {
-    <start:@L> "property" <name_start:@L> <name:NAME> <name_end:@R> ":" 
-        <domain_cardinality:Optional<Cardinality>> <domain:TypeRef> 
-        "->" 
-        <range_cardinality:Optional<Cardinality>> <range:TypeRef> 
-    <end:@R> => {
+    <start:@L> "property" <name_start:@L> <name:NAME> <name_end:@R> ":"
+        <domain_cardinality:Optional<Cardinality>> <domain:TypeRef>
+        "->"
+        <range_cardinality:Optional<Cardinality>> <range:TypeRef>
+    <end:@R> NEWLINE
+    INDENT <axioms:PropertyAxiom+> DEDENT => {
         PropertyDef {
             name: SpannedString::new(name, Some(Span { start: name_start, end: name_end })),
             domain_cardinality,
             domain,
             range_cardinality,
             range,
+            axioms,
             span: Some(Span { start, end }),
         }
+    },
+    <start:@L> "property" <name_start:@L> <name:NAME> <name_end:@R> ":"
+        <domain_cardinality:Optional<Cardinality>> <domain:TypeRef>
+        "->"
+        <range_cardinality:Optional<Cardinality>> <range:TypeRef>
+    <end:@R> NEWLINE => {
+        PropertyDef {
+            name: SpannedString::new(name, Some(Span { start: name_start, end: name_end })),
+            domain_cardinality,
+            domain,
+            range_cardinality,
+            range,
+            axioms: vec![],
+            span: Some(Span { start, end }),
+        }
+    },
+};
+
+// ============================================================================
+// QUERY
+// ============================================================================
+
+QueryDef: QueryDef = {
+    <start:@L> "query" <name_start:@L> <name:NAME> <name_end:@R> ":" NEWLINE
+    INDENT <body:QueryBody> DEDENT <end:@R>
+    => QueryDef { name, body, span: Some(Span { start, end }), name_span: Some(Span { start: name_start, end: name_end }) }
+};
+
+QueryBody: QueryBody = {
+    <start:@L> <clauses:QueryClause*> <group_by:GroupByBlock?> <return_block:ReturnBlock?> <end:@R>
+    => QueryBody { clauses, group_by, return_block, span: Some(Span { start, end }) }
+};
+
+QueryClause: QueryClause = {
+    <sp:QSubjectPattern>  => QueryClause::SubjectPattern(sp),
+    <eb:QExistenceBlock>  => QueryClause::ExistenceBlock(eb),
+    <qc:QComposition>     => QueryClause::Composition(qc),
+    <bf:QBoolFilter>      => QueryClause::BooleanFilter(bf),
+    <aq:QAggClause>       => QueryClause::AggregationQuery(aq),
+    <it:QInverseTriple>   => QueryClause::InverseTriple(it),
+};
+
+// Bare inverse triple at body/existence level: `is prop of ?var`
+QInverseTriple: InverseTriple = {
+    <start:@L> "is" <property:QualifiedName> "of" <obj:Object> NEWLINE <end:@R>
+    => InverseTriple { property, object: obj, span: Some(Span { start, end }) }
+};
+
+// ── Subject patterns ─────────────────────────────────────────────────────────
+
+QSubjectPattern: SubjectPattern = {
+    // named with type + indented block
+    <start:@L> <subject:VARIABLE> "a" <type_ref:TypeRef> NEWLINE
+    INDENT <properties:QPropertyPattern+> DEDENT <end:@R>
+    => SubjectPattern { subject: Some(subject), type_ref: Some(type_ref), properties,
+                        span: Some(Span { start, end }) },
+    // named with type, no properties (bare type assertion)
+    <start:@L> <subject:VARIABLE> "a" <type_ref:TypeRef> NEWLINE <end:@R>
+    => SubjectPattern { subject: Some(subject), type_ref: Some(type_ref), properties: vec![],
+                        span: Some(Span { start, end }) },
+
+    // anonymous with type + indented block
+    <start:@L> "a" <type_ref:TypeRef> NEWLINE
+    INDENT <properties:QPropertyPattern+> DEDENT <end:@R>
+    => SubjectPattern { subject: None, type_ref: Some(type_ref), properties,
+                        span: Some(Span { start, end }) },
+    // anonymous with type, no properties
+    <start:@L> "a" <type_ref:TypeRef> NEWLINE <end:@R>
+    => SubjectPattern { subject: None, type_ref: Some(type_ref), properties: vec![],
+                        span: Some(Span { start, end }) },
+
+    // untyped + indented block
+    <start:@L> <subject:VARIABLE> NEWLINE
+    INDENT <properties:QPropertyPattern+> DEDENT <end:@R>
+    => SubjectPattern { subject: Some(subject), type_ref: None, properties,
+                        span: Some(Span { start, end }) },
+
+    // inline value property with optional continuation block
+    <start:@L> <subject:VARIABLE> <property:QualifiedName> <object:Object> NEWLINE
+    INDENT <more:QPropertyPattern+> DEDENT <end:@R>
+    => SubjectPattern {
+        subject: Some(subject), type_ref: None,
+        properties: { let mut p = vec![PropertyPattern::Value { property, object, span: None }]; p.extend(more); p },
+        span: Some(Span { start, end }),
+    },
+    <start:@L> <subject:VARIABLE> <property:QualifiedName> <object:Object> NEWLINE <end:@R>
+    => SubjectPattern {
+        subject: Some(subject), type_ref: None,
+        properties: vec![PropertyPattern::Value { property, object, span: None }],
+        span: Some(Span { start, end }),
+    },
+
+    // inline constrained property (no continuation — spec has no such example)
+    <start:@L> <subject:VARIABLE> <property:QualifiedName> <block:ConstraintBlock> NEWLINE <end:@R>
+    => SubjectPattern {
+        subject: Some(subject), type_ref: None,
+        properties: vec![PropertyPattern::Constrained { property, block, span: None }],
+        span: Some(Span { start, end }),
+    },
+
+    // inline nested block property
+    <start:@L> <subject:VARIABLE> <property:QualifiedName> <block:QSubjectBlock> NEWLINE <end:@R>
+    => SubjectPattern {
+        subject: Some(subject), type_ref: None,
+        properties: vec![PropertyPattern::Nested { property, block, span: None }],
+        span: Some(Span { start, end }),
+    },
+
+    // inline inverse: ?subject is prop of ?var
+    <start:@L> <subject:VARIABLE> "is" <property:QualifiedName> "of" <outer_var:VARIABLE> NEWLINE <end:@R>
+    => SubjectPattern {
+        subject: Some(subject), type_ref: None,
+        properties: vec![PropertyPattern::Inverse { property, outer_var, span: None }],
+        span: Some(Span { start, end }),
+    },
+
+    // inline inverse nested: ?subject is prop of [constraints]
+    <start:@L> <subject:VARIABLE> "is" <property:QualifiedName> "of" <block:ConstraintBlock> NEWLINE <end:@R>
+    => SubjectPattern {
+        subject: Some(subject), type_ref: None,
+        properties: vec![PropertyPattern::InverseNested { property, block, span: None }],
+        span: Some(Span { start, end }),
+    },
+};
+
+// ── Property patterns ────────────────────────────────────────────────────────
+
+QPropertyPattern: PropertyPattern = {
+    <start:@L> <property:QualifiedName> <object:Object> NEWLINE <end:@R>
+    => PropertyPattern::Value { property, object, span: Some(Span { start, end }) },
+
+    <start:@L> <property:QualifiedName> <block:ConstraintBlock> NEWLINE <end:@R>
+    => PropertyPattern::Constrained { property, block, span: Some(Span { start, end }) },
+
+    <start:@L> "optional" <property:QualifiedName> <object:Object> NEWLINE <end:@R>
+    => PropertyPattern::Optional { property, object, span: Some(Span { start, end }) },
+
+    <start:@L> "is" <property:QualifiedName> "of" <outer_var:VARIABLE> NEWLINE <end:@R>
+    => PropertyPattern::Inverse { property, outer_var, span: Some(Span { start, end }) },
+
+    <start:@L> "is" <property:QualifiedName> "of" <block:ConstraintBlock> NEWLINE <end:@R>
+    => PropertyPattern::InverseNested { property, block, span: Some(Span { start, end }) },
+
+    <start:@L> <property:QualifiedName> <block:QSubjectBlock> NEWLINE <end:@R>
+    => PropertyPattern::Nested { property, block, span: Some(Span { start, end }) },
+
+    <start:@L> <either_branch:QEitherBranch> <or_branches:QOrBranch+> <end:@R>
+    => PropertyPattern::Disjunction { either_branch, or_branches, span: Some(Span { start, end }) },
+};
+
+// Multi-line nested subject block: [ NEWLINE INDENT ... DEDENT ]
+QSubjectBlock: SubjectBlock = {
+    <start:@L> "[" NEWLINE INDENT <properties:QPropertyPattern+> DEDENT "]" <end:@R>
+    => SubjectBlock { properties, span: Some(Span { start, end }) }
+};
+
+QEitherBranch: DisjBranch = {
+    <start:@L> "either" <property:QualifiedName> <block:ConstraintBlock> NEWLINE <end:@R>
+    => DisjBranch { property, block, span: Some(Span { start, end }) }
+};
+
+QOrBranch: DisjBranch = {
+    <start:@L> "or" <property:QualifiedName> <block:ConstraintBlock> NEWLINE <end:@R>
+    => DisjBranch { property, block, span: Some(Span { start, end }) }
+};
+
+// ── Existence blocks ─────────────────────────────────────────────────────────
+
+QExistenceBlock: ExistenceBlock = {
+    <start:@L> "some" ":" NEWLINE INDENT <clauses:QueryClause+> DEDENT <end:@R>
+    => ExistenceBlock { negated: false, clauses, span: Some(Span { start, end }) },
+
+    <start:@L> "none" ":" NEWLINE INDENT <clauses:QueryClause+> DEDENT <end:@R>
+    => ExistenceBlock { negated: true, clauses, span: Some(Span { start, end }) },
+};
+
+// ── Query composition ────────────────────────────────────────────────────────
+
+QComposition: QueryComposition = {
+    <start:@L> <query_name:QualifiedName> "as" "[" NEWLINE
+    INDENT <bindings:QCompositionPair+> DEDENT "]" NEWLINE? <end:@R>
+    => QueryComposition {
+        query_name,
+        binding: CompositionBinding::Named(bindings),
+        span: Some(Span { start, end }),
+    },
+
+    <start:@L> <query_name:QualifiedName> "as" <var:VARIABLE> NEWLINE <end:@R>
+    => QueryComposition {
+        query_name,
+        binding: CompositionBinding::Scalar(var),
+        span: Some(Span { start, end }),
+    },
+};
+
+QCompositionPair: (String, String) = {
+    <field:NAME> <var:VARIABLE> NEWLINE => (field, var)
+};
+
+// ── Boolean filters ───────────────────────────────────────────────────────────
+
+QBoolFilter: BoolExpr = {
+    <start:@L> <left:VARIABLE> <op:ComparisonOp> <right:QBoolOperand> NEWLINE <end:@R>
+    => BoolExpr { left: BoolOperand::Variable(left), op, right, span: Some(Span { start, end }) }
+};
+
+QBoolOperand: BoolOperand = {
+    <v:VARIABLE> => BoolOperand::Variable(v),
+    <l:Literal>  => BoolOperand::Literal(l),
+};
+
+// ── Body-level aggregation sub-query ─────────────────────────────────────────
+
+QAggClause: AggregationQuery = {
+    <start:@L> <kind_name:NAME> <input_var:VARIABLE> "as" <result_var:VARIABLE> NEWLINE
+    INDENT <sub_clauses:QueryClause+> DEDENT <end:@R>
+    =>? {
+        let kind = match kind_name.as_str() {
+            "count"   => AggKind::Count,
+            "average" => AggKind::Average,
+            "sum"     => AggKind::Sum,
+            "min"     => AggKind::Min,
+            "max"     => AggKind::Max,
+            other => return Err(lalrpop_util::ParseError::User {
+                error: LexerError::new(
+                    format!("unknown aggregation '{}'; expected count, average, sum, min, or max", other),
+                    start,
+                    ErrorCode::UnexpectedToken,
+                )
+            }),
+        };
+        Ok(AggregationQuery { kind, input_var, result_var, sub_clauses, span: Some(Span { start, end }) })
     }
+};
+
+// ── Group-by block ────────────────────────────────────────────────────────────
+
+GroupByBlock: GroupByBlock = {
+    <start:@L> "group by" <var:VARIABLE> NEWLINE
+    INDENT <items:GroupByItem+> DEDENT <end:@R>
+    => {
+        let mut specs = vec![];
+        let mut having = vec![];
+        for (s, h) in items {
+            if let Some(s) = s { specs.push(s); }
+            if let Some(h) = h { having.push(h); }
+        }
+        GroupByBlock { var, specs, having, span: Some(Span { start, end }) }
+    }
+};
+
+GroupByItem: (Option<AggregationSpec>, Option<BoolExpr>) = {
+    <start:@L> <kind_name:NAME> <input_var:VARIABLE> "as" <result_var:VARIABLE> NEWLINE <end:@R>
+    =>? {
+        let kind = match kind_name.as_str() {
+            "count"   => AggKind::Count,
+            "average" => AggKind::Average,
+            "sum"     => AggKind::Sum,
+            "min"     => AggKind::Min,
+            "max"     => AggKind::Max,
+            other => return Err(lalrpop_util::ParseError::User {
+                error: LexerError::new(
+                    format!("unknown aggregation '{}'; expected count, average, sum, min, or max", other),
+                    start,
+                    ErrorCode::UnexpectedToken,
+                )
+            }),
+        };
+        Ok((Some(AggregationSpec { kind, input_var, result_var, span: Some(Span { start, end }) }), None))
+    },
+
+    <start:@L> <left:VARIABLE> <op:ComparisonOp> <right:QBoolOperand> NEWLINE <end:@R>
+    => (None, Some(BoolExpr { left: BoolOperand::Variable(left), op, right, span: Some(Span { start, end }) })),
+};
+
+// ── Return block ─────────────────────────────────────────────────────────────
+
+ReturnBlock: ReturnBlock = {
+    <start:@L> "return" NEWLINE INDENT <lines:ReturnLine*> DEDENT <end:@R>
+    => {
+        let mut columns = vec![];
+        let mut limit = None;
+        for (col, lim) in lines {
+            if let Some(c) = col { columns.push(c); }
+            if let Some(n) = lim { limit = Some(n); }
+        }
+        ReturnBlock { columns, limit, span: Some(Span { start, end }) }
+    }
+};
+
+ReturnLine: (Option<ColumnSpec>, Option<u64>) = {
+    // ?var with modifier sub-block
+    <start:@L> <var:VARIABLE> NEWLINE INDENT <mods:ColModLine+> DEDENT <end:@R>
+    => {
+        let mut order = None;
+        let mut distinct = false;
+        for (o, d) in mods { if let Some(dir) = o { order = Some(dir); } if d { distinct = true; } }
+        (Some(ColumnSpec { alias: None, var, order, distinct, span: Some(Span { start, end }) }), None)
+    },
+    // ?var without modifier
+    <start:@L> <var:VARIABLE> NEWLINE <end:@R>
+    => (Some(ColumnSpec { alias: None, var, order: None, distinct: false,
+                          span: Some(Span { start, end }) }), None),
+
+    // alias ?var with modifier sub-block
+    <start:@L> <alias:NAME> <var:VARIABLE> NEWLINE INDENT <mods:ColModLine+> DEDENT <end:@R>
+    => {
+        let mut order = None;
+        let mut distinct = false;
+        for (o, d) in mods { if let Some(dir) = o { order = Some(dir); } if d { distinct = true; } }
+        (Some(ColumnSpec { alias: Some(alias), var, order, distinct, span: Some(Span { start, end }) }), None)
+    },
+    // alias ?var without modifier
+    <start:@L> <alias:NAME> <var:VARIABLE> NEWLINE <end:@R>
+    => (Some(ColumnSpec { alias: Some(alias), var, order: None, distinct: false,
+                          span: Some(Span { start, end }) }), None),
+
+    // limit N
+    <start:@L> <kw:NAME> <n:INT> NEWLINE <end:@R>
+    =>? {
+        if kw == "limit" {
+            Ok((None, Some(n as u64)))
+        } else {
+            Err(lalrpop_util::ParseError::User {
+                error: LexerError::new(
+                    format!("expected 'limit', got '{}'", kw),
+                    start,
+                    ErrorCode::UnexpectedToken,
+                )
+            })
+        }
+    },
+};
+
+ColModLine: (Option<OrderDir>, bool) = {
+    // order asc / order desc
+    <start:@L> <kw1:NAME> <kw2:NAME> NEWLINE <end:@R>
+    =>? {
+        if kw1 != "order" {
+            return Err(lalrpop_util::ParseError::User {
+                error: LexerError::new(
+                    format!("expected 'order' or 'distinct', got '{}'", kw1),
+                    start,
+                    ErrorCode::UnexpectedToken,
+                )
+            });
+        }
+        match kw2.as_str() {
+            "asc"  => Ok((Some(OrderDir::Asc), false)),
+            "desc" => Ok((Some(OrderDir::Desc), false)),
+            other  => Err(lalrpop_util::ParseError::User {
+                error: LexerError::new(
+                    format!("expected 'asc' or 'desc', got '{}'", other),
+                    start,
+                    ErrorCode::UnexpectedToken,
+                )
+            }),
+        }
+    },
+    // distinct
+    <start:@L> <kw:NAME> NEWLINE <end:@R>
+    =>? {
+        if kw == "distinct" {
+            Ok((None, true))
+        } else {
+            Err(lalrpop_util::ParseError::User {
+                error: LexerError::new(
+                    format!("expected 'order' or 'distinct', got '{}'", kw),
+                    start,
+                    ErrorCode::UnexpectedToken,
+                )
+            })
+        }
+    },
+};
+
+QueryArg: QueryArg = {
+    <start:@L> <name:VARIABLE> <end:@R> NEWLINE =>
+        QueryArg::Var { name, span: Some(Span { start, end }) },
+    <start:@L> <param:VARIABLE> "=" <value:Object> <end:@R> NEWLINE =>
+        QueryArg::Binding { param, value, span: Some(Span { start, end }) },
 };
 
 // ============================================================================
@@ -382,7 +915,11 @@ MatchPattern: Pattern = {
         Pattern::Triple { subject, property, object: Object::Constraint { block }, span: Some(Span { start, end }) },
     <start:@L> <subject:Subject> "a" <type_ref:TypeRef> <end:@R> NEWLINE =>
         Pattern::Type { subject, type_ref, span: Some(Span { start, end }) },
-    <start:@L> <quantifier:Quantifier> <variable:VARIABLE> <constraint:Optional<ConstraintBlock>> ":" 
+    <start:@L> <subject:Subject> "is" <property:QualifiedName> "of" <object:Object> <end:@R> NEWLINE =>
+        Pattern::Inverse { subject, property, object, span: Some(Span { start, end }) },
+    <start:@L> <subject:Subject> "is" <property:QualifiedName> "of" <block:ConstraintBlock> <end:@R> NEWLINE =>
+        Pattern::Inverse { subject, property, object: Object::Constraint { block }, span: Some(Span { start, end }) },
+    <start:@L> <quantifier:Quantifier> <variable:VARIABLE> <constraint:Optional<ConstraintBlock>> ":"
         NEWLINE INDENT <patterns:MatchPattern+> DEDENT <end:@R> => {
         Pattern::Quantified {
             quantifier,
@@ -392,6 +929,9 @@ MatchPattern: Pattern = {
             span: Some(Span { start, end }),
         }
     },
+    <start:@L> <name:QualifiedName> NEWLINE
+        INDENT <args:QueryArg+> DEDENT <end:@R> =>
+        Pattern::QueryCall { name, args, span: Some(Span { start, end }) },
 };
 
 Quantifier: Quantifier = {
@@ -463,20 +1003,20 @@ NestedRule: RuleDef = {
 /// A top-level fact: `fact <id> a <Type>, ...`
 FactDef: FactDef = {
     // fact with body
-    <start:@L> "fact" <id:NAME> "a" <types:Comma<QualifiedName>> NEWLINE
+    <start:@L> "fact" <id_start:@L> <id:NAME> <id_end:@R> "a" <types:Comma<QualifiedName>> NEWLINE
     INDENT <assertions:FactAssertion+> DEDENT <end:@R>
-    => FactDef { id, types, assertions, span: Some(Span { start, end }) },
+    => FactDef { id, types, assertions, span: Some(Span { start, end }), id_span: Some(Span { start: id_start, end: id_end }) },
 
     // fact without body (bare declaration)
-    <start:@L> "fact" <id:NAME> "a" <types:Comma<QualifiedName>> <end:@R> NEWLINE
-    => FactDef { id, types, assertions: vec![], span: Some(Span { start, end }) },
+    <start:@L> "fact" <id_start:@L> <id:NAME> <id_end:@R> "a" <types:Comma<QualifiedName>> <end:@R> NEWLINE
+    => FactDef { id, types, assertions: vec![], span: Some(Span { start, end }), id_span: Some(Span { start: id_start, end: id_end }) },
 };
 
 /// One assertion line within a fact body
 FactAssertion: FactAssertion = {
     // property_name value, value, ...
-    <start:@L> <name:NAME> <values:Comma<FactValue>> <end:@R> NEWLINE
-    => FactAssertion::Property { name, values, span: Some(Span { start, end }) },
+    <start:@L> <property:QualifiedName> <values:Comma<FactValue>> <end:@R> NEWLINE
+    => FactAssertion::Property { property, values, span: Some(Span { start, end }) },
 
     // is <property> of <value>
     <start:@L> "is" <property:QualifiedName> "of" <value:FactValue> <end:@R> NEWLINE
@@ -522,8 +1062,14 @@ Subject: Subject = {
 };
 
 Object: Object = {
-    <start:@L> <v:VARIABLE> <end:@R> => Object::Variable { name: v, span: Some(Span { start, end }) },
-    <start:@L> <v:Expr> <end:@R> => Object::Literal { value: v, span: Some(Span { start, end }) },
+    // A bare variable and a variable-operand math expression both flow through
+    // `Expr` (see `PrimaryExpr`). Collapse a lone `Expr::Variable` back to
+    // `Object::Variable` so downstream consumers keep the same AST shape; any
+    // compound expression stays an `Object::Literal`.
+    <start:@L> <v:Expr> <end:@R> => match v {
+        Expr::Variable { name, span } => Object::Variable { name, span },
+        _ => Object::Literal { value: v, span: Some(Span { start, end }) },
+    },
     <start:@L> <n:QualifiedName> <end:@R> => Object::Constant { value: n, span: Some(Span { start, end }) },
 };
 
@@ -542,18 +1088,26 @@ NoCmpConstraint: Constraint = {
         Constraint::PropertyConstraint { property, block, span: Some(Span { start, end }) }
     },
 };
-
+ 
 ConstraintBlock: ConstraintBlock = {
     <start:@L> "[" <constraints:Comma<Constraint>> "]" <end:@R> => ConstraintBlock { constraints, span: Some(Span { start, end }) }
 };
 
 Constraint: Constraint = {
-    <start:@L> "a" <type_ref:TypeRef> <end:@R> => Constraint::TypeIs { type_ref, span: Some(Span { start, end }) },
-    <start:@L> <op:ComparisonOp> <value:Expr> <end:@R> => Constraint::Comparison { operator: op, value, span: Some(Span { start, end }) },
-    <start:@L> <property:QualifiedName> <value:Object> <end:@R> => Constraint::PropertyValue { property, value, span: Some(Span { start, end }) },
-    <start:@L> <property:QualifiedName> <block:ConstraintBlock> <end:@R> => {
-        Constraint::PropertyConstraint { property, block, span: Some(Span { start, end }) }
-    },
+    <start:@L> "a" <type_ref:TypeRef> <end:@R>
+        => Constraint::TypeIs { type_ref, span: Some(Span { start, end }) },
+    <start:@L> <op:ComparisonOp> <value:Expr> <end:@R>
+        => Constraint::Comparison { binding: None, operator: op, value, span: Some(Span { start, end }) },
+    <start:@L> <binding:VARIABLE> <op:ComparisonOp> <value:Expr> <end:@R>
+        => Constraint::Comparison { binding: Some(binding), operator: op, value, span: Some(Span { start, end }) },
+    <start:@L> <property:QualifiedName> <value:Object> <end:@R>
+        => Constraint::PropertyValue { property, value, span: Some(Span { start, end }) },
+    <start:@L> <property:QualifiedName> <block:ConstraintBlock> <end:@R>
+        => Constraint::PropertyConstraint { property, block, span: Some(Span { start, end }) },
+    <start:@L> "is" <property:QualifiedName> "of" <value:Object> <end:@R>
+        => Constraint::Inverse { property, value, span: Some(Span { start, end }) },
+    <start:@L> "is" <property:QualifiedName> "of" <block:ConstraintBlock> <end:@R>
+        => Constraint::InverseNested { property, block, span: Some(Span { start, end }) },
 };
 
 ComparisonOp: ComparisonOp = {
@@ -579,6 +1133,10 @@ PrimitiveType: TypeRef = {
     <start:@L> "int" <end:@R> => TypeRef::Primitive { kind: PrimitiveKind::Int, span: Some(Span { start, end }) },
     <start:@L> "float" <end:@R> => TypeRef::Primitive { kind: PrimitiveKind::Float, span: Some(Span { start, end }) },
     <start:@L> "boolean" <end:@R> => TypeRef::Primitive { kind: PrimitiveKind::Boolean, span: Some(Span { start, end }) },
+    <start:@L> "date" <end:@R> => TypeRef::Primitive { kind: PrimitiveKind::Date, span: Some(Span { start, end }) },
+    <start:@L> "date_time" <end:@R> => TypeRef::Primitive { kind: PrimitiveKind::DateTime, span: Some(Span { start, end }) },
+    <start:@L> "time" <end:@R> => TypeRef::Primitive { kind: PrimitiveKind::Time, span: Some(Span { start, end }) },
+    <start:@L> "duration" <end:@R> => TypeRef::Primitive { kind: PrimitiveKind::Duration, span: Some(Span { start, end }) },
 };
 
 QualifiedName: QualifiedName = {
@@ -586,13 +1144,17 @@ QualifiedName: QualifiedName = {
         let mut parts = vec![first];
         parts.extend(rest);
         QualifiedName::new(parts, Some(Span { start, end }))
-    }
+    },
+    <start:@L> <pn:PREFIXED_NAME> <end:@R> => {
+        QualifiedName::new_prefixed(pn.0, pn.1, Some(Span { start, end }))
+    },
 };
 
 QualifiedNameOrIRI: QualifiedName = {
     <QualifiedName> => <>,
-    <start:@L> <iri:IRI> <end:@R> => QualifiedName { 
-        parts: vec![iri], 
+    <start:@L> <iri:IRI> <end:@R> => QualifiedName {
+        parts: vec![iri],
+        is_prefixed: false,
         span: Some(Span { start, end }),
     }
 };
@@ -613,9 +1175,19 @@ Cardinality: Cardinality = {
         max: Some(max as usize),
         span: Some(Span { start, end }),
     },
-    <start:@L> <min:INT> ".." "*" <end:@R> => Cardinality::Range { 
-        min: min as usize, 
+    <start:@L> <min:INT> ".." "*" <end:@R> => Cardinality::Range {
+        min: min as usize,
         max: None,
+        span: Some(Span { start, end }),
+    },
+    <start:@L> "at_least" <n:INT> <end:@R> => Cardinality::Range {
+        min: n as usize,
+        max: None,
+        span: Some(Span { start, end }),
+    },
+    <start:@L> "at_most" <n:INT> <end:@R> => Cardinality::Range {
+        min: 0,
+        max: Some(n as usize),
         span: Some(Span { start, end }),
     },
 };
@@ -635,6 +1207,8 @@ Literal: Literal = {
     <start:@L> <s:STRING> <end:@R> => Literal::String { value: s, span: Some(Span { start, end })},
     <start:@L> <b:BOOLEAN> <end:@R> => Literal::Boolean { value: b, span: Some(Span { start, end })},
     <start:@L> <i:IRI> <end:@R> => Literal::Iri { value: i, span: Some(Span { start, end })},
+    <start:@L> <t:TEMPORAL_LIT> <end:@R> => Literal::Temporal { kind: t.0, content: t.1, span: Some(Span { start, end })},
+    <start:@L> <c:QUANTITY_LIT> <end:@R> => Literal::Quantity { content: c, span: Some(Span { start, end })},
 };
 
 // ============================================================================
@@ -688,6 +1262,10 @@ UnaryExpr: Expr = {
 
 PrimaryExpr: Expr = {
     <start:@L> "(" <e:Expr> ")" <end:@R> => e,
+    <start:@L> <v:VARIABLE> <end:@R> => Expr::Variable {
+        name: v,
+        span: Some(Span { start, end }),
+    },
     <start:@L> <n:INT> <end:@R> => Expr::Literal {
         value: Literal::Int { value: n, span: Some(Span { start, end }) },
         span: Some(Span { start, end }),
@@ -706,6 +1284,14 @@ PrimaryExpr: Expr = {
     },
     <start:@L> <i:IRI> <end:@R> => Expr::Literal {
         value: Literal::Iri { value: i, span: Some(Span { start, end }) },
+        span: Some(Span { start, end }),
+    },
+    <start:@L> <t:TEMPORAL_LIT> <end:@R> => Expr::Literal {
+        value: Literal::Temporal { kind: t.0, content: t.1, span: Some(Span { start, end }) },
+        span: Some(Span { start, end }),
+    },
+    <start:@L> <c:QUANTITY_LIT> <end:@R> => Expr::Literal {
+        value: Literal::Quantity { content: c, span: Some(Span { start, end }) },
         span: Some(Span { start, end }),
     },
 };

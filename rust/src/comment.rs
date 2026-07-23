@@ -137,7 +137,7 @@ impl CommentMap {
 
         // collect all node sspans from the AST, sorted
         let mut node_spans = Vec::new();
-        collect_spans(ontology, &mut node_spans);
+        collect_spans(&ontology, &mut node_spans);
         node_spans.sort();
 
         let mut map = CommentMap::default();
@@ -282,11 +282,11 @@ fn classify_comment(comment: &Comment, node_spans: &[Span]) -> Option<(CommentPl
         }
     }
 
-    if the_last_return.is_some() {
+    if let Some(_) = the_last_return {
       return the_last_return;
     }
 
-    if postponed.is_some() {
+    if let Some(_) = postponed {
         return postponed;
     }
 
@@ -379,5 +379,104 @@ fn collect_declaration_spans(decl: &Declaration, out: &mut Vec<Span>) {
                 out.push(span);
             }
         }
+        Declaration::Query(query_def) => {
+            if let Some(span) = query_def.span {
+                out.push(span);
+            }
+        }
+        Declaration::Unit(unit_def) => {
+            if let Some(span) = unit_def.span {
+                out.push(span);
+            }
+        }
+    }
+}
+
+/// Language-tagged doc comment lines (`#xx> text`, see clarification.md's
+/// "Doc comments, languages, and the `#xx>` prefix"). Shared between the
+/// Turtle emitter (irukame) and the LSP hover provider (dolfin-lsp-core).
+pub mod lang_tag {
+    /// Validate a `#xx>` / `definition@xx` language tag against the shared
+    /// charset `^[a-z]{2,3}(-[A-Za-z0-9]+)*$` (lowercase 2-3 char primary
+    /// subtag + optional `-SUBTAG` segments, e.g. `en`, `pt-BR`, `zh-Hant`).
+    pub fn is_lang_tag(s: &str) -> bool {
+        let mut parts = s.split('-');
+        let Some(primary) = parts.next() else {
+            return false;
+        };
+        if !(2..=3).contains(&primary.len()) || !primary.bytes().all(|b| b.is_ascii_lowercase())
+        {
+            return false;
+        }
+        parts.all(|sub| !sub.is_empty() && sub.bytes().all(|b| b.is_ascii_alphanumeric()))
+    }
+
+    /// Split a trimmed comment line into an optional language tag and its
+    /// text. Recognises the leading `#xx> text` prefix: on a trimmed `line`,
+    /// if it matches `^([a-z]{2,3}(-[A-Za-z0-9]+)*)>( .*)?$` returns
+    /// `(Some(lang), text)` with at most one leading space after `>`
+    /// stripped and internal spacing preserved; otherwise `(None, line)`.
+    /// The `>` must be followed by a single space or end-of-line, so
+    /// `# TODO> x`, `# a>b`, `# note: a > b` are untagged.
+    pub fn parse_lang_prefix(line: &str) -> (Option<String>, String) {
+        let Some(gt) = line.find('>') else {
+            return (None, line.to_string());
+        };
+        let token = &line[..gt];
+        if !is_lang_tag(token) {
+            return (None, line.to_string());
+        }
+        let after = &line[gt + 1..];
+        if after.is_empty() {
+            (Some(token.to_string()), String::new())
+        } else if let Some(rest) = after.strip_prefix(' ') {
+            (Some(token.to_string()), rest.to_string())
+        } else {
+            // `>` followed by a non-space char is not a language prefix.
+            (None, line.to_string())
+        }
+    }
+
+    /// Group non-empty, non-annotation (`@...`) lines from `text` by their
+    /// `#xx>` language tag: consecutive lines sharing a language form one
+    /// group (joined with a single space), preserving first-appearance
+    /// order. The tag itself is stripped from each group's text.
+    pub fn group_lines_by_lang<'a>(
+        lines: impl Iterator<Item = &'a str>,
+    ) -> Vec<(Option<String>, String)> {
+        let mut groups: Vec<(Option<String>, String)> = Vec::new();
+        for line in lines {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('@') {
+                continue;
+            }
+            let (lang, text) = parse_lang_prefix(trimmed);
+            match groups.last_mut() {
+                Some((prev_lang, prev_text)) if *prev_lang == lang => {
+                    prev_text.push(' ');
+                    prev_text.push_str(&text);
+                }
+                _ => groups.push((lang, text)),
+            }
+        }
+        groups
+    }
+
+    /// Pick the group matching the first language in `prefs` (an ordered,
+    /// most-preferred-first list) that has a translation, falling back to
+    /// the untagged group, then to whichever group appeared first.
+    pub fn pick_by_lang<'a>(
+        groups: &'a [(Option<String>, String)],
+        prefs: &[String],
+    ) -> Option<&'a (Option<String>, String)> {
+        for p in prefs {
+            if let Some(g) = groups.iter().find(|(l, _)| l.as_deref() == Some(p.as_str())) {
+                return Some(g);
+            }
+        }
+        groups
+            .iter()
+            .find(|(l, _)| l.is_none())
+            .or_else(|| groups.first())
     }
 }
