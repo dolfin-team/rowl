@@ -330,6 +330,46 @@ fn collect_spans(ontology: &OntologyFile, out: &mut Vec<Span>) {
     }
 }
 
+fn collect_type_ref_spans(type_ref: &crate::TypeRef, out: &mut Vec<Span>) {
+    match type_ref {
+        crate::TypeRef::Named { span, .. } | crate::TypeRef::Primitive { span, .. } => {
+            if let Some(span) = span {
+                out.push(*span);
+            }
+        }
+        crate::TypeRef::Union { members, span } => {
+            if let Some(span) = span {
+                out.push(*span);
+            }
+            for m in members {
+                collect_type_ref_spans(m, out);
+            }
+        }
+    }
+}
+
+/// Fact assertion lines, including those inside `[ ... ]` blocks, so a comment
+/// on its own line in a fact body leads the assertion below it.
+fn collect_fact_assertion_spans(assertions: &[crate::ast::FactAssertion], out: &mut Vec<Span>) {
+    use crate::ast::{FactAssertion, FactValue};
+    for assertion in assertions {
+        let (FactAssertion::Property { span, .. }
+        | FactAssertion::Inverse { span, .. }
+        | FactAssertion::TypeHint { span, .. }) = assertion;
+        out.extend(*span);
+        let values: &[FactValue] = match assertion {
+            FactAssertion::Property { values, .. } => values,
+            FactAssertion::Inverse { value, .. } => std::slice::from_ref(value),
+            FactAssertion::TypeHint { .. } => &[],
+        };
+        for value in values {
+            if let FactValue::Block { assertions, .. } = value {
+                collect_fact_assertion_spans(assertions, out);
+            }
+        }
+    }
+}
+
 fn collect_declaration_spans(decl: &Declaration, out: &mut Vec<Span>) {
     match decl {
         Declaration::Concept(concept_def) => {
@@ -342,18 +382,7 @@ fn collect_declaration_spans(decl: &Declaration, out: &mut Vec<Span>) {
                 }
             }
             for sd in &concept_def.parents {
-                match sd {
-                    crate::TypeRef::Named { name: _, span } => {
-                        if let Some(span) = span {
-                            out.push(*span);
-                        }
-                    }
-                    crate::TypeRef::Primitive { kind: _, span } => {
-                        if let Some(span) = span {
-                            out.push(*span);
-                        }
-                    }
-                }
+                collect_type_ref_spans(sd, out);
             }
             if let Some(one_of) = &concept_def.one_of {
               for oo in one_of {
@@ -378,6 +407,7 @@ fn collect_declaration_spans(decl: &Declaration, out: &mut Vec<Span>) {
             if let Some(span) = fact_def.span {
                 out.push(span);
             }
+            collect_fact_assertion_spans(&fact_def.assertions, out);
         }
         Declaration::Query(query_def) => {
             if let Some(span) = query_def.span {

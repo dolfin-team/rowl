@@ -530,6 +530,29 @@ concept Thing:
         assert_eq!(pkg.dolfin_version, "1");
         assert_eq!(pkg.version, "1.0.0");
         assert_eq!(pkg.author, Some("Jane Doe".to_string()));
+        assert_eq!(pkg.description, vec![(None, "Biology ontology".to_string())]);
+    }
+
+    #[test]
+    fn test_parse_package_multilingual_description() {
+        let source = r#"package com.example.biology:
+  dolfin_version "1"
+  version "1.0.0"
+  description "Biology ontology"
+  description@fr "Ontologie de la biologie"
+  description@pt-BR "Ontologia da biologia"
+"#;
+        let result = parse_package(source);
+        assert!(result.is_ok(), "Error: {:?}", result.err());
+        let pkg = result.unwrap();
+        assert_eq!(
+            pkg.description,
+            vec![
+                (None, "Biology ontology".to_string()),
+                (Some("fr".to_string()), "Ontologie de la biologie".to_string()),
+                (Some("pt-BR".to_string()), "Ontologia da biologia".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -1073,6 +1096,31 @@ concept Employee:
         match &concept.parents[0] {
             crate::ast::TypeRef::Named { name, .. } => assert_eq!(name.parts, vec!["P", "Person"]),
             _ => panic!("expected Named TypeRef"),
+        }
+    }
+
+    #[test]
+    fn test_parse_union_type_ref_in_property_domain_range() {
+        let source = "concept A\nconcept B\nproperty reportsTo: (A or B) -> (A or B)\n";
+        let result = parse_ontology(source);
+        assert!(result.is_ok(), "Error: {:?}", result.errors());
+        let onto = result.ontology.unwrap();
+        let prop = &onto.properties()[0];
+        for type_ref in [&prop.domain, &prop.range] {
+            match type_ref {
+                crate::ast::TypeRef::Union { members, .. } => {
+                    assert_eq!(members.len(), 2);
+                    match &members[0] {
+                        crate::ast::TypeRef::Named { name, .. } => assert_eq!(name.last(), "A"),
+                        _ => panic!("expected Named union member"),
+                    }
+                    match &members[1] {
+                        crate::ast::TypeRef::Named { name, .. } => assert_eq!(name.last(), "B"),
+                        _ => panic!("expected Named union member"),
+                    }
+                }
+                _ => panic!("expected Union TypeRef"),
+            }
         }
     }
 

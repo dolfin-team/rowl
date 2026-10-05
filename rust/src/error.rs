@@ -373,6 +373,9 @@ pub struct Diagnostic {
     pub help: Option<String>,
     /// Additional labeled spans providing context.
     pub labels: Vec<DiagnosticLabel>,
+    /// Grammar terminals the parser would have accepted at `span` (lalrpop's
+    /// `expected`, e.g. `NAME`, `"\":\""`). Empty when unknown.
+    pub expected: Vec<String>,
 }
 
 impl_python! {
@@ -396,6 +399,7 @@ impl Diagnostic {
             span,
             help,
             labels: labels.unwrap_or_default(),
+            expected: Vec::new(),
         }
     }
 
@@ -445,7 +449,7 @@ impl Diagnostic {
             location,
             end_location,
             code: self.code,
-            expected: Vec::new(),
+            expected: self.expected,
             help: self.help,
         }
     }
@@ -496,6 +500,7 @@ pub struct DiagnosticBuilder {
     span: Option<Span>,
     help: Option<String>,
     labels: Vec<DiagnosticLabel>,
+    expected: Vec<String>,
 }
 
 impl DiagnosticBuilder {
@@ -508,6 +513,7 @@ impl DiagnosticBuilder {
             span: None,
             help: None,
             labels: vec![],
+            expected: vec![],
         }
     }
 
@@ -559,6 +565,12 @@ impl DiagnosticBuilder {
         self
     }
 
+    /// Set the grammar terminals the parser expected at this position
+    pub fn expected(mut self, expected: Vec<String>) -> Self {
+        self.expected = expected;
+        self
+    }
+
     /// Build the final diagnostic
     pub fn build(self) -> Diagnostic {
         Diagnostic {
@@ -568,6 +580,7 @@ impl DiagnosticBuilder {
             span: self.span,
             help: self.help,
             labels: self.labels,
+            expected: self.expected,
         }
     }
 }
@@ -843,7 +856,7 @@ impl ParseError {
             builder = builder.help(help.as_str());
         }
 
-        builder.build()
+        builder.expected(self.expected).build()
     }
 }
 
@@ -1083,13 +1096,23 @@ impl From<Severity> for dolfin_diagnostic::Severity {
 
 impl From<&Diagnostic> for dolfin_diagnostic::Diagnostic {
     fn from(d: &Diagnostic) -> Self {
-        dolfin_diagnostic::DiagnosticBuilder::new(
+        // `help` carries the half of a parse error that tells you what to type
+        // ("Expected `one of`, `sub`, or `has`"); dropping it here made it
+        // invisible to every consumer downstream of the unified type (LSP,
+        // Problems panel, raft) even though the parser had produced it.
+        let mut b = dolfin_diagnostic::DiagnosticBuilder::new(
             d.severity.into(),
             dolfin_diagnostic::DiagnosticCode::Parse(d.code as u16),
             d.message.clone(),
         )
-        .span_opt(d.span.map(Into::into))
-        .build()
+        .span_opt(d.span.map(Into::into));
+        if let Some(help) = &d.help {
+            b = b.help(help.clone());
+        }
+        for l in &d.labels {
+            b = b.label(l.span.into(), l.message.clone());
+        }
+        b.expected(d.expected.clone()).build()
     }
 }
 

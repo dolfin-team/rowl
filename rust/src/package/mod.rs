@@ -101,9 +101,14 @@ impl Package {
         &self.manifest.version
     }
 
-    /// Iterate over all ontology files in the package.
+    /// Iterate over all ontology files in the package, sorted by namespace.
+    ///
+    /// `ontologies` is a `HashMap` with a per-instance random seed; sorting
+    /// keeps generated output (e.g. Turtle section order) stable across loads.
     pub fn iter_ontologies(&self) -> impl Iterator<Item = (&QualifiedName, &OntologyFile)> {
-        self.ontologies.iter()
+        let mut v: Vec<_> = self.ontologies.iter().collect();
+        v.sort_by(|(a, _), (b, _)| (&a.parts, a.is_prefixed).cmp(&(&b.parts, b.is_prefixed)));
+        v.into_iter()
     }
 
     /// Get an ontology by its namespace.
@@ -113,16 +118,14 @@ impl Package {
 
     /// Get all concepts across all ontologies.
     pub fn all_concepts(&self) -> Vec<(&QualifiedName, &ast::ConceptDef)> {
-        self.ontologies
-            .iter()
+        self.iter_ontologies()
             .flat_map(|(ns, onto)| onto.ast.concepts_as_ref().into_iter().map(move |c| (ns, c)))
             .collect()
     }
 
     /// Get all properties across all ontologies.
     pub fn all_properties(&self) -> Vec<(&QualifiedName, &ast::PropertyDef)> {
-        self.ontologies
-            .iter()
+        self.iter_ontologies()
             .flat_map(|(ns, onto)| {
                 onto.ast
                     .properties_as_ref()
@@ -134,8 +137,7 @@ impl Package {
 
     /// Get all enums across all ontologies.
     pub fn all_enums(&self) -> Vec<(&QualifiedName, &ast::ConceptDef)> {
-        self.ontologies
-            .iter()
+        self.iter_ontologies()
             .flat_map(|(ns, onto)| {
                 onto.ast.concepts_as_ref().into_iter().filter_map(move |c| {
                     if c.one_of.is_some() {
@@ -179,8 +181,7 @@ impl Package {
 
     /// Get all rules across all ontologies.
     pub fn all_rules(&self) -> Vec<(&QualifiedName, &ast::RuleDef)> {
-        self.ontologies
-            .iter()
+        self.iter_ontologies()
             .flat_map(|(ns, onto)| onto.ast.rules_as_ref().into_iter().map(move |r| (ns, r)))
             .collect()
     }
@@ -360,7 +361,7 @@ pub fn check_package<P: AsRef<Path>>(path: P) -> Result<Vec<String>, Box<Package
     let mut warnings = Vec::new();
 
     // Check for empty ontologies
-    for (ns, onto) in &package.ontologies {
+    for (ns, onto) in package.iter_ontologies() {
         if onto.ast.declarations.is_empty() {
             warnings.push(format!(
                 "Ontology '{}' ({}) has no declarations",

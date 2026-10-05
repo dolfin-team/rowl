@@ -85,6 +85,7 @@ extern {
         
         // Identifiers
         PREFIXED_NAME => Token::PrefixedName(<(String, String)>),
+        TAGGED_NAME => Token::TaggedName(<(String, String)>),
         NAME => Token::Name(<String>),
         VARIABLE => Token::Variable(<String>),
         TEMPORAL_LIT => Token::TemporalLit(<(TemporalKind, String)>),
@@ -199,7 +200,7 @@ pub PackageFile: PackageFile = {
             dolfin_version: String::new(),
             version: String::new(),
             author: None,
-            description: None,
+            description: Vec::new(),
             span: Some(Span { start, end }),
         };
         for field in fields {
@@ -207,7 +208,7 @@ pub PackageFile: PackageFile = {
                 PackageField::DolfinVersion(v) => manifest.dolfin_version = v,
                 PackageField::Version(v) => manifest.version = v,
                 PackageField::Author(v) => manifest.author = Some(v),
-                PackageField::Description(v) => manifest.description = Some(v),
+                PackageField::Description(lang, v) => manifest.description.push((lang, v)),
             }
         }
         manifest
@@ -220,7 +221,7 @@ PackageField: PackageField = {
             "dolfin_version" => Ok(PackageField::DolfinVersion(v)),
             "version" => Ok(PackageField::Version(v)),
             "author" => Ok(PackageField::Author(v)),
-            "description" => Ok(PackageField::Description(v)),
+            "description" => Ok(PackageField::Description(None, v)),
             _ => Err(lalrpop_util::ParseError::UnrecognizedToken {
                 token: (l, Token::Name(f), r),
                 expected: vec![
@@ -231,7 +232,20 @@ PackageField: PackageField = {
                 ],
             }),
         }
-    }    
+    },
+    // `description@en "…"` — a language-tagged manifest field. Only
+    // `description` accepts a `@lang` tag; the others are single-valued.
+    <l:@L> <f:TAGGED_NAME> <r:@R> <v:STRING> NEWLINE =>? {
+        let (key, lang) = f;
+        if key == "description" {
+            Ok(PackageField::Description(Some(lang), v))
+        } else {
+            Err(lalrpop_util::ParseError::UnrecognizedToken {
+                token: (l, Token::TaggedName((key, lang)), r),
+                expected: vec!["description@<lang>".to_string()],
+            })
+        }
+    },
 };
 
 // ============================================================================
@@ -282,8 +296,10 @@ IriNameAnnotation: IriNameValue = {
 /// any order at the top of the file without an LR ambiguity.
 HeaderItem: HeaderItem = {
     <p:PrefixStmt> => HeaderItem::Prefixes(p),
-    <a:LOCALE_DIRECTIVE> NEWLINE+ => HeaderItem::Locale(a),
-    <a:TIMEZONE_DIRECTIVE> NEWLINE+ => HeaderItem::Timezone(a),
+    <l:@L> <a:LOCALE_DIRECTIVE> <r:@R> NEWLINE+ =>
+        HeaderItem::Locale(SpannedString::new(a, Some(Span { start: l, end: r }))),
+    <l:@L> <a:TIMEZONE_DIRECTIVE> <r:@R> NEWLINE+ =>
+        HeaderItem::Timezone(SpannedString::new(a, Some(Span { start: l, end: r }))),
 };
 
 // ============================================================================
@@ -312,7 +328,7 @@ Num: f64 = {
 
 // Keyword is `unitdef`, not `unit` — `unit` is already an established,
 // widely-used ordinary identifier (e.g. the `unit.Mass` qualified-name
-// convention in docs/src/code/units.dlf), so it can't be reserved without
+// convention in docs/src/language/code/units.dlf), so it can't be reserved without
 // breaking that existing usage.
 UnitDef: UnitDef = {
     // `unitdef family vegetables`
@@ -401,10 +417,11 @@ OneOfBlock: (Vec<OneOfVariant>, Span) = {
 
 OneOfItem: OneOfVariant = {
     <start:@L> <name:NAME> <pre_end:@R> <constraints:NoCmpConstraintBlock?> <end:@R> NEWLINE => {
+        let name_span = Some(Span { start, end: pre_end });
         if constraints.is_some() {
-          OneOfVariant { name, constraints, span: Some(Span { start, end }) }
+          OneOfVariant { name, name_span, constraints, span: Some(Span { start, end }) }
         } else {
-          OneOfVariant { name, constraints, span: Some(Span { start, end: pre_end }) }
+          OneOfVariant { name, name_span, constraints, span: Some(Span { start, end: pre_end }) }
         }
     }
 };
@@ -414,12 +431,12 @@ SubDeclaration: (Vec<TypeRef>, Span) = {
 };
 
 HasDeclaration: HasDeclaration = {
-    <start:@L> "has" <is_key:("key")?> <name:NAME> ":" <cardinality:Optional<Cardinality>> <type_ref:TypeRef> <end:@R> NEWLINE
+    <start:@L> "has" <is_key:("key")?> <name_start:@L> <name:NAME> <name_end:@R> ":" <cardinality:Optional<Cardinality>> <type_ref:TypeRef> <end:@R> NEWLINE
     INDENT <axioms:PropertyAxiom+> DEDENT => {
-        HasDeclaration { name, is_key: is_key.is_some(), cardinality, type_ref, axioms, span: Some(Span { start, end }) }
+        HasDeclaration { name, name_span: Some(Span { start: name_start, end: name_end }), is_key: is_key.is_some(), cardinality, type_ref, axioms, span: Some(Span { start, end }) }
     },
-    <start:@L> "has" <is_key:("key")?> <name:NAME> ":" <cardinality:Optional<Cardinality>> <type_ref:TypeRef> <end:@R> NEWLINE => {
-        HasDeclaration { name, is_key: is_key.is_some(), cardinality, type_ref, axioms: vec![], span: Some(Span { start, end }) }
+    <start:@L> "has" <is_key:("key")?> <name_start:@L> <name:NAME> <name_end:@R> ":" <cardinality:Optional<Cardinality>> <type_ref:TypeRef> <end:@R> NEWLINE => {
+        HasDeclaration { name, name_span: Some(Span { start: name_start, end: name_end }), is_key: is_key.is_some(), cardinality, type_ref, axioms: vec![], span: Some(Span { start, end }) }
     },
 };
 
@@ -982,6 +999,12 @@ Assertion: ThenItem = {
                     "Qualified name that is not a primitive".to_string(),
                 ],
             }),
+            TypeRef::Union { .. } => Err(lalrpop_util::ParseError::UnrecognizedToken {
+                token: (l, Token::Name("(".to_string()), r),
+                expected: vec![
+                    "A single qualified name — `then ... a (A or B)` cannot assert a union type".to_string(),
+                ],
+            }),
         },
 };
 
@@ -1124,6 +1147,17 @@ ComparisonOp: ComparisonOp = {
 // ============================================================================
 
 TypeRef: TypeRef = {
+    <TypeRefAtom> => <>,
+    <start:@L> "(" <first:TypeRefAtom> <rest:("or" <TypeRefAtom>)+> ")" <end:@R> => {
+        let mut members = vec![first];
+        members.extend(rest);
+        TypeRef::Union { members, span: Some(Span { start, end }) }
+    },
+};
+
+// A union member: named/primitive only — `owl:unionOf` lists name classes,
+// never nested union expressions, so unions stay flat (no `((A or B) or C)`).
+TypeRefAtom: TypeRef = {
     <start:@L> <n:QualifiedName> <end:@R> => TypeRef::Named { name: n, span: Some(Span { start, end }) },
     <PrimitiveType> => <>,
 };

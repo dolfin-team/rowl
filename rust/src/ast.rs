@@ -13,7 +13,7 @@ use crate::{
 
 /// A qualified (dot-separated) name in Dolfin.
 #[cfg_attr(feature = "python", pyclass(frozen, get_all, from_py_object))]
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct QualifiedName {
     /// The individual components of the qualified name (e.g., ["com", "example", "Person"])
     pub parts: Vec<String>,
@@ -22,6 +22,24 @@ pub struct QualifiedName {
     pub is_prefixed: bool,
     /// Source code span for this declaration
     pub span: Option<Span>,
+}
+
+// Equality and hashing ignore `span`: two occurrences of the same name are the
+// same name. Span-sensitive equality made package namespace lookups miss
+// (`base.join(path)` merges spans, index keys carry none).
+impl PartialEq for QualifiedName {
+    fn eq(&self, other: &Self) -> bool {
+        self.parts == other.parts && self.is_prefixed == other.is_prefixed
+    }
+}
+
+impl Eq for QualifiedName {}
+
+impl std::hash::Hash for QualifiedName {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.parts.hash(state);
+        self.is_prefixed.hash(state);
+    }
 }
 
 impl_python! {
@@ -188,10 +206,11 @@ pub struct OntologyFile {
     pub prefixes: Vec<PrefixDecl>,
     /// Declarations (concepts, properties, enums, rules)
     pub declarations: Vec<Declaration>,
-    /// Raw `@locale <arg>` directive argument (e.g. `"d/m/y"`), if present.
-    pub locale: Option<String>,
+    /// Raw `@locale <arg>` directive argument (e.g. `"d/m/y"`), if present,
+    /// spanning the directive.
+    pub locale: Option<SpannedString>,
     /// Raw `@timezone <arg>` directive argument (e.g. `"Europe/Brussels"`).
-    pub timezone: Option<String>,
+    pub timezone: Option<SpannedString>,
     pub span: Option<Span>,
 }
 
@@ -220,13 +239,13 @@ impl OntologyFile {
     /// The raw `@locale` directive argument, if the file declared one.
     #[getter]
     fn locale_directive(&self) -> Option<String> {
-        self.locale.clone()
+        self.locale.as_ref().map(|d| d.get().clone())
     }
 
     /// The raw `@timezone` directive argument, if the file declared one.
     #[getter]
     fn timezone_directive(&self) -> Option<String> {
-        self.timezone.clone()
+        self.timezone.as_ref().map(|d| d.get().clone())
     }
 
     fn __repr__(&self) -> String {
@@ -367,8 +386,11 @@ pub struct PackageFile {
     pub version: String,
     /// Optional author
     pub author: Option<String>,
-    /// Optional description
-    pub description: Option<String>,
+    /// Multilingual description entries as `(lang, text)`; `None` = untagged.
+    /// Source order preserved. See `clarification.md`, "Doc comments,
+    /// languages, and the `#xx>` prefix" for the shared multilingual
+    /// convention (`description@en "…"` mirrors `definition@en=…`).
+    pub description: Vec<(Option<String>, String)>,
     pub span: Option<Span>,
 }
 
@@ -377,13 +399,13 @@ impl_python! {
 impl PackageFile {
     /// Create a new package file
     #[new]
-    #[pyo3(signature = (name, dolfin_version, version, author=None, description=None, span=None))]
+    #[pyo3(signature = (name, dolfin_version, version, author=None, description=vec![], span=None))]
     pub fn new(
         name: QualifiedName,
         dolfin_version: String,
         version: String,
         author: Option<String>,
-        description: Option<String>,
+        description: Vec<(Option<String>, String)>,
         span: Option<Span>,
     ) -> Self {
         Self { name, dolfin_version, version, author, description, span }
@@ -409,8 +431,8 @@ pub enum PackageField {
     Version(String),
     /// Package author
     Author(String),
-    /// Package description
-    Description(String),
+    /// Package description: `(lang, text)`, `None` lang = untagged.
+    Description(Option<String>, String),
 }
 
 /// Prefix declaration
@@ -661,8 +683,9 @@ impl ConceptDef {
 }
 
 /// Declarations within a concept
-#[allow(clippy::large_enum_variant)]
 #[cfg_attr(feature = "python", pyclass(frozen, from_py_object))]
+// pyo3 complex-enum fields can't be boxed transparently; the AST is built once, size is fine.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConceptMember {
     /// Subclass declarations (parent types)
@@ -859,6 +882,8 @@ impl PropertyAxiom {
 pub struct HasDeclaration {
     /// The property name
     pub name: String,
+    /// Span of the name token alone (used by rename / goto-definition)
+    pub name_span: Option<Span>,
     /// Whether this property is part of the primary key set
     pub is_key: bool,
     /// Optional cardinality constraint
@@ -881,10 +906,11 @@ impl HasDeclaration {
     ///     type_ref: The type reference
     ///     cardinality: Optional cardinality constraint (default: None)
     #[new]
-    #[pyo3(signature = (name, type_ref, cardinality=None, is_key=false, axioms=vec![], span=None))]
-    pub fn new(name: String, type_ref: TypeRef, cardinality: Option<&Cardinality>, is_key: bool, axioms: Vec<PropertyAxiom>, span: Option<Span>) -> Self {
+    #[pyo3(signature = (name, type_ref, cardinality=None, is_key=false, axioms=vec![], span=None, name_span=None))]
+    pub fn new(name: String, type_ref: TypeRef, cardinality: Option<&Cardinality>, is_key: bool, axioms: Vec<PropertyAxiom>, span: Option<Span>, name_span: Option<Span>) -> Self {
         Self {
             name,
+            name_span,
             is_key,
             cardinality: cardinality.cloned(),
             type_ref,
@@ -935,6 +961,7 @@ impl PropertyDef {
     ///     range_cardinality: Optional range cardinality (default: None)
     #[new]
     #[pyo3(signature = (name, domain, range, domain_cardinality=None, range_cardinality=None, axioms=vec![], span=None, name_span=None))]
+    #[allow(clippy::too_many_arguments)] // mirrors the Python constructor signature
     pub fn new(
         name: String,
         domain: TypeRef,
@@ -971,6 +998,8 @@ impl PropertyDef {
 pub struct OneOfVariant {
     /// The individual name (e.g. WHITE, RED)
     pub name: String,
+    /// Span of the name token alone — `span` also covers any constraint block.
+    pub name_span: Option<Span>,
     /// Optional constraint block fixing key property values
     pub constraints: Option<ConstraintBlock>,
     pub span: Option<Span>,
@@ -980,9 +1009,9 @@ impl_python! {
 #[pymethods]
 impl OneOfVariant {
     #[new]
-    #[pyo3(signature = (name, constraints=None, span=None))]
-    pub fn new(name: String, constraints: Option<ConstraintBlock>, span: Option<Span>) -> Self {
-        Self { name, constraints, span }
+    #[pyo3(signature = (name, constraints=None, span=None, name_span=None))]
+    pub fn new(name: String, constraints: Option<ConstraintBlock>, span: Option<Span>, name_span: Option<Span>) -> Self {
+        Self { name, name_span, constraints, span }
     }
 
     fn __repr__(&self) -> String {
@@ -1564,8 +1593,9 @@ impl ThenBlock {
 }
 }
 /// Items in a then block
-#[allow(clippy::large_enum_variant)]
 #[cfg_attr(feature = "python", pyclass(frozen, from_py_object))]
+// pyo3 complex-enum fields can't be boxed transparently; the AST is built once, size is fine.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ThenItem {
     /// An assertion triple (subject-property-object)
@@ -2393,15 +2423,15 @@ impl Constraint {
 /// directives may appear in any order at the top of a file.
 pub enum HeaderItem {
     Prefixes(Vec<PrefixDecl>),
-    Locale(String),
-    Timezone(String),
+    Locale(SpannedString),
+    Timezone(SpannedString),
 }
 
 /// The declared type of a temporal smart literal, i.e. which constructor
 /// keyword introduced it (`date(...)`, `time(...)`, `date_time(...)`,
 /// `duration(...)`). The value itself is parsed by the `dolfin-datetime` crate,
 /// which also infers a type; the declared kind is validated against it.
-#[cfg_attr(feature = "python", pyclass(eq, eq_int))]
+#[cfg_attr(feature = "python", pyclass(eq, eq_int, from_py_object))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TemporalKind {
     Date,
@@ -2529,20 +2559,35 @@ impl OntologyFile {
     /// directive is malformed (bad locale order, unknown timezone). Absent
     /// directives yield a strict (default) context.
     pub fn temporal_context(&self) -> Result<dolfin_datetime::TemporalContext, String> {
-        let locale = match &self.locale {
-            Some(s) => Some(parse_locale_arg(s)?),
-            None => None,
-        };
-        let timezone = match &self.timezone {
-            Some(s) => {
-                let tz = dolfin_datetime::Timezone::Named(s.clone());
-                // Resolve eagerly so an unknown/unsupported zone surfaces here.
-                tz.resolve().map_err(|e| e.to_string())?;
-                Some(tz)
+        let (ctx, errors) = self.temporal_context_lenient();
+        match errors.into_iter().next() {
+            Some((msg, _)) => Err(msg),
+            None => Ok(ctx),
+        }
+    }
+
+    /// Like [`Self::temporal_context`], but each directive stands alone: a
+    /// malformed one is left unset (it does not disable the other) and
+    /// returned as `(message, directive span)`.
+    pub fn temporal_context_lenient(
+        &self,
+    ) -> (dolfin_datetime::TemporalContext, Vec<(String, Option<Span>)>) {
+        let mut errors = Vec::new();
+        let locale = self.locale.as_ref().and_then(|d| {
+            parse_locale_arg(d.get()).map_err(|e| errors.push((e, d.span))).ok()
+        });
+        let timezone = self.timezone.as_ref().and_then(|d| {
+            let tz = dolfin_datetime::Timezone::Named(d.get().clone());
+            // Resolve eagerly so an unknown/unsupported zone surfaces here.
+            match tz.resolve() {
+                Ok(_) => Some(tz),
+                Err(e) => {
+                    errors.push((e.to_string(), d.span));
+                    None
+                }
             }
-            None => None,
-        };
-        Ok(dolfin_datetime::TemporalContext { locale, timezone })
+        });
+        (dolfin_datetime::TemporalContext { locale, timezone }, errors)
     }
 }
 
@@ -2671,7 +2716,7 @@ impl fmt::Display for Literal {
     }
 }
 
-/// Type reference (qualified name or primitive)
+/// Type reference (qualified name, primitive, or a union of member types)
 #[cfg_attr(feature = "python", pyclass(frozen, from_py_object))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeRef {
@@ -2681,6 +2726,13 @@ pub enum TypeRef {
     },
     Primitive {
         kind: PrimitiveKind,
+        span: Option<Span>,
+    },
+    /// `(A or B or C)` — surfaces `owl:unionOf` (`rdfs:domain`/`rdfs:range`
+    /// class-expression unions). Members are always `Named`/`Primitive` —
+    /// the grammar keeps unions flat, no nested union members.
+    Union {
+        members: Vec<TypeRef>,
         span: Option<Span>,
     },
 }
@@ -2772,11 +2824,18 @@ impl TypeRef {
         }
     }
 
+    /// Create a union type reference
+    #[staticmethod]
+    fn union(members: Vec<TypeRef>) -> Self {
+        TypeRef::Union { members, span: None }
+    }
+
     #[getter]
     fn type_kind(&self) -> &str {
         match self {
             TypeRef::Named { .. } => "named",
             TypeRef::Primitive { .. } => "primitive",
+            TypeRef::Union { .. } => "union",
         }
     }
 
@@ -2796,10 +2855,22 @@ impl TypeRef {
         }
     }
 
+    #[getter]
+    fn union_members(&self) -> Option<Vec<TypeRef>> {
+        match self {
+            TypeRef::Union { members, .. } => Some(members.clone()),
+            _ => None,
+        }
+    }
+
     fn __repr__(&self) -> String {
         match self {
             TypeRef::Named { name, .. } => format!("TypeRef.Named({})", name),
             TypeRef::Primitive { kind, .. } => format!("TypeRef.Primitive({:?})", kind),
+            TypeRef::Union { members, .. } => format!(
+                "TypeRef.Union({})",
+                members.iter().map(|m| m.__repr__()).collect::<Vec<_>>().join(", ")
+            ),
         }
     }
 
@@ -2807,6 +2878,7 @@ impl TypeRef {
         match self {
             TypeRef::Named { name, .. } => name.full(),
             TypeRef::Primitive { kind, .. } => format!("{:?}", kind).to_lowercase(),
+            TypeRef::Union { .. } => self.to_string(),
         }
     }
 }
@@ -2816,6 +2888,16 @@ impl fmt::Display for TypeRef {
         match self {
             TypeRef::Named { name, .. } => write!(f, "{}", name),
             TypeRef::Primitive { kind, .. } => write!(f, "{:?}", kind),
+            TypeRef::Union { members, .. } => {
+                write!(f, "(")?;
+                for (i, m) in members.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " or ")?;
+                    }
+                    write!(f, "{}", m)?;
+                }
+                write!(f, ")")
+            }
         }
     }
 }
@@ -3147,15 +3229,20 @@ impl Quantifier {
         }
     }
 
+    /// Dolfin source form: `at least 2`, `between 1, ?n`, `none`.
     fn __str__(&self) -> String {
+        let n = |v: &CardinalityValue| match v {
+            CardinalityValue::Int { value, .. } => value.to_string(),
+            CardinalityValue::Variable { name, .. } => name.clone(),
+        };
         match self {
-            Quantifier::All { .. } => "All".to_string(),
-            Quantifier::None { .. } => "None".to_string(),
-            Quantifier::Any { .. } => "Any".to_string(),
-            Quantifier::AtLeast { value, .. } => format!("AtLeast({:?})", value),
-            Quantifier::AtMost { value, .. } => format!("AtMost({:?})", value),
-            Quantifier::Exactly { value, .. } => format!("Exactly({:?})", value),
-            Quantifier::Between { min, max, .. } => format!("Between({:?}, {:?})", min, max),
+            Quantifier::All { .. } => "all".to_string(),
+            Quantifier::None { .. } => "none".to_string(),
+            Quantifier::Any { .. } => "any".to_string(),
+            Quantifier::AtLeast { value, .. } => format!("at least {}", n(value)),
+            Quantifier::AtMost { value, .. } => format!("at most {}", n(value)),
+            Quantifier::Exactly { value, .. } => format!("exactly {}", n(value)),
+            Quantifier::Between { min, max, .. } => format!("between {}, {}", n(min), n(max)),
         }
     }
 }
@@ -3217,6 +3304,22 @@ pub enum PrimitiveKind {
     DateTime,
     Time,
     Duration,
+}
+
+impl PrimitiveKind {
+    /// The XSD datatype this kind maps to, as a prefixed `xsd:` name.
+    pub fn xsd(&self) -> &'static str {
+        match self {
+            PrimitiveKind::String => "xsd:string",
+            PrimitiveKind::Int => "xsd:integer",
+            PrimitiveKind::Float => "xsd:double",
+            PrimitiveKind::Boolean => "xsd:boolean",
+            PrimitiveKind::Date => "xsd:date",
+            PrimitiveKind::DateTime => "xsd:dateTime",
+            PrimitiveKind::Time => "xsd:time",
+            PrimitiveKind::Duration => "xsd:duration",
+        }
+    }
 }
 
 impl_python! {

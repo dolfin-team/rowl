@@ -12,6 +12,33 @@ use logos::Logos;
 use std::collections::VecDeque;
 use tracing::debug;
 
+/// Every single-word reserved keyword spelling — the identifier grammar is
+/// `[a-zA-Z][a-zA-Z0-9_]*`, so any of these collide with a name an author
+/// might want (`date`, `mapping`, `has`, …) and need the `` `word` `` backtick
+/// escape (see `Token::Name`) to be used as one. Multi-word tokens (`one of`,
+/// `group by`, `inverse of`, `equivalent to`, `at least`, `at most`) and the
+/// `@`-prefixed `@iri_name` can never collide with an identifier, since
+/// identifiers contain no whitespace or `@`, so they're excluded.
+///
+/// Single source of truth for "is this word a keyword" outside the lexer
+/// (editor completion hints, quick-fix code actions) — keep in sync with the
+/// `#[token(...)]` literals on `RawToken` below.
+pub const RESERVED_WORDS: &[&str] = &[
+    "package", "prefix", "as", "concept", "property", "rule", "match", "then", "sub", "has",
+    "key", "a", "fact", "mapping", "query", "return", "either", "or", "is", "transitive",
+    "symmetric", "reflexive", "unitdef", "family", "nominal", "scale", "all", "none", "at_least",
+    "at_most", "exactly", "between", "of", "one", "any", "some", "optional", "string", "int", "float",
+    "boolean", "date", "date_time", "time", "duration", "true", "false",
+];
+
+/// The primitive/temporal type-name keywords (`TString`..`TDuration`).
+/// Single source of truth for editor syntax highlighters that classify
+/// types separately from other keywords — keep in sync with the
+/// `#[token(...)]` literals on `RawToken` below.
+pub const TYPE_KEYWORDS: &[&str] = &[
+    "string", "int", "float", "boolean", "date", "date_time", "time", "duration",
+];
+
 /// Token types for the Dolfin language
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
@@ -144,6 +171,10 @@ pub enum Token {
     // Identifiers and special
     /// Prefixed name (alias:LocalName with no whitespace around colon)
     PrefixedName((String, String)),
+    /// Identifier carrying an inline BCP-47 language tag (`description@en`) —
+    /// `(name, lang)`. Used by `package.dlf` manifest fields that accept a
+    /// language variant; tag charset matches `comment::lang_tag::is_lang_tag`.
+    TaggedName((String, String)),
     /// Identifier name
     Name(String),
     /// Variable (starts with ?)
@@ -276,6 +307,7 @@ impl std::fmt::Display for Token {
             Token::LocaleDirective(a) => write!(f, "@locale {}", a),
             Token::TimezoneDirective(a) => write!(f, "@timezone {}", a),
             Token::PrefixedName((prefix, local)) => write!(f, "{}:{}", prefix, local),
+            Token::TaggedName((name, lang)) => write!(f, "{}@{}", name, lang),
             Token::Name(s) => write!(f, "{}", s),
             Token::Variable(s) => write!(f, "{}", s),
             Token::Colon => write!(f, ":"),
@@ -423,6 +455,9 @@ pub enum RawToken {
     /// 'exactly' quantifier
     #[token("exactly")]
     Exactly,
+    /// 'between' quantifier
+    #[token("between")]
+    Between,
     /// 'of' keyword (used in 'one of:' construct)
     #[token("of")]
     Of,
@@ -517,7 +552,9 @@ pub enum RawToken {
 
     // IRI
     /// IRI literal
-    #[regex(r"<[^>]+>", parse_iri)]
+    // Turtle IRIREF charset: no whitespace, so a `<` comparison never swallows
+    // text up to a later `>`.
+    #[regex(r#"<[^<>\s"{}|^`\\]+>"#, parse_iri)]
     Iri(String),
 
     // Variable (starts with ?)
@@ -529,7 +566,21 @@ pub enum RawToken {
     #[regex(r"[a-zA-Z][a-zA-Z0-9_]*:[a-zA-Z][a-zA-Z0-9_]*", parse_prefixed_name, priority = 2)]
     PrefixedName((String, String)),
 
+    /// Identifier with an inline `@lang` tag (`description@en`), e.g. a
+    /// multilingual `package.dlf` manifest field. Tag charset mirrors
+    /// `comment::lang_tag::is_lang_tag`: `[a-z]{2,3}(-[A-Za-z0-9]+)*`.
+    #[regex(r"[a-zA-Z][a-zA-Z0-9_]*@[a-z]{2,3}(-[A-Za-z0-9]+)*", parse_tagged_name, priority = 2)]
+    TaggedName((String, String)),
+
     /// Identifier name
+    ///
+    /// The backtick form (`` `date` ``) escapes an identifier that would
+    /// otherwise collide with a reserved keyword — e.g. `has \`date\`: date`
+    /// declares a property literally named `date`, typed as the `date`
+    /// primitive. Backticks are stripped at lex time and the result is a
+    /// plain [`Token::Name`]; the grammar never sees a difference, so no
+    /// keyword needs a `\`kw\`` alternative wired in on the parser side.
+    #[regex(r"`[a-zA-Z][a-zA-Z0-9_]*`", parse_backtick_name)]
     #[regex(r"[a-zA-Z][a-zA-Z0-9_]*", |lex| lex.slice().to_string(), priority = 1)]
     Name(String),
 
@@ -618,6 +669,14 @@ fn parse_prefixed_name(lex: &logos::Lexer<RawToken>) -> Option<(String, String)>
     Some((prefix, local))
 }
 
+fn parse_tagged_name(lex: &logos::Lexer<RawToken>) -> Option<(String, String)> {
+    let slice = lex.slice();
+    let mut parts = slice.splitn(2, '@');
+    let name = parts.next()?.to_string();
+    let lang = parts.next()?.to_string();
+    Some((name, lang))
+}
+
 fn parse_int(lex: &logos::Lexer<RawToken>) -> Option<i64> {
     let slice = lex.slice();
     let cleaned: String = slice.chars().filter(|c| *c != '_').collect();
@@ -658,6 +717,12 @@ fn parse_string(lex: &logos::Lexer<RawToken>) -> Option<String> {
 }
 
 fn parse_iri(lex: &logos::Lexer<RawToken>) -> Option<String> {
+    let slice = lex.slice();
+    Some(slice[1..slice.len() - 1].to_string())
+}
+
+/// Strip the surrounding backticks off a `` `keyword` `` escaped identifier.
+fn parse_backtick_name(lex: &logos::Lexer<RawToken>) -> Option<String> {
     let slice = lex.slice();
     Some(slice[1..slice.len() - 1].to_string())
 }
@@ -864,6 +929,7 @@ impl<'input> Lexer<'input> {
             RawToken::AtLeast => Token::AtLeast,
             RawToken::AtMost => Token::AtMost,
             RawToken::Exactly => Token::Exactly,
+            RawToken::Between => Token::Between,
             RawToken::Of => Token::Of,
             RawToken::One => Token::One,
             RawToken::Any => Token::Any,
@@ -889,6 +955,7 @@ impl<'input> Lexer<'input> {
             RawToken::TimezoneDirective(a) => Token::TimezoneDirective(a),
             RawToken::Variable(v) => Token::Variable(v),
             RawToken::PrefixedName(p) => Token::PrefixedName(p),
+            RawToken::TaggedName(t) => Token::TaggedName(t),
             RawToken::Name(n) => Token::Name(n),
             RawToken::Arrow => Token::Arrow,
             RawToken::DoubleDot => Token::DoubleDot,

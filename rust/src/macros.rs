@@ -116,7 +116,6 @@ macro_rules! impl_python {
         // impossible here — the macro can't tell which are python-only, and
         // wrapping pyo3's `#[getter]`/`#[new]` in `cfg_attr` breaks `#[pymethods]`.
         // Scope the allow to this branch only; under `python` they are live.
-        #[allow(clippy::too_many_arguments)]
         #[allow(dead_code)]
         impl $type {
             $(
