@@ -137,7 +137,7 @@ impl CommentMap {
 
         // collect all node sspans from the AST, sorted
         let mut node_spans = Vec::new();
-        collect_spans(&ontology, &mut node_spans);
+        collect_spans(ontology, &mut node_spans);
         node_spans.sort();
 
         let mut map = CommentMap::default();
@@ -282,11 +282,11 @@ fn classify_comment(comment: &Comment, node_spans: &[Span]) -> Option<(CommentPl
         }
     }
 
-    if let Some(_) = the_last_return {
+    if the_last_return.is_some() {
       return the_last_return;
     }
 
-    if let Some(_) = postponed {
+    if postponed.is_some() {
         return postponed;
     }
 

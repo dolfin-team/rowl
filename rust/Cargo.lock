@@ -93,9 +93,9 @@ dependencies = [
 
 [[package]]
 name = "dolfin-datetime"
-version = "0.1.8"
+version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a338a05aa75a8179582402316fa649eb74d3bef72a5bc0d9e65ffade8d67ff2"
+checksum = "347b45545397cf38c86622474612bf8f7f42e312c481ea30bc832f56faa5d529"
 dependencies = [
  "nom",
  "thiserror",
@@ -104,15 +104,15 @@ dependencies = [
 
 [[package]]
 name = "dolfin-diagnostic"
-version = "0.1.8"
+version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff71dbac2e41dfa7fbb3ccc3d83169f2c5e841c49c0fab8a9940a1b72773d669"
+checksum = "80eaeea75fbe3d4bdb27060a53391ba15f71c1949767b17bdf645265399a7d6f"
 
 [[package]]
 name = "dolfin-units"
-version = "0.1.8"
+version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "592bd37d5f5a180ad430bbe52a2ed738863d5434d08dfb9e5ca94bdfb3d97fc7"
+checksum = "8dbb177d7e20256457da5692a86967fc105af670dce271cadaffa4f7f18f9808"
 dependencies = [
  "once_cell",
  "thiserror",
@@ -529,7 +529,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "rowl"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "dolfin-datetime",
  "dolfin-diagnostic",

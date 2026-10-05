@@ -120,13 +120,12 @@ fn parse_args(text: &str) -> Vec<(String, String)> {
         }
         let indent = after_at.len() - trimmed.len();
         let content = trimmed.strip_suffix('\\').unwrap_or(trimmed).trim_end();
-        if let Some((last_content, last_indent)) = joined.last_mut() {
-            if indent > *last_indent {
+        if let Some((last_content, last_indent)) = joined.last_mut()
+            && indent > *last_indent {
                 last_content.push(' ');
                 last_content.push_str(content);
                 continue;
             }
-        }
         joined.push((content.to_string(), indent));
     }
 

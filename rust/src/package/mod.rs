@@ -138,7 +138,7 @@ impl Package {
             .iter()
             .flat_map(|(ns, onto)| {
                 onto.ast.concepts_as_ref().into_iter().filter_map(move |c| {
-                    if let Some(_) = c.one_of {
+                    if c.one_of.is_some() {
                         Some((ns, c))
                     } else {
                         None
