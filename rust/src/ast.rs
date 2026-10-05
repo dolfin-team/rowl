@@ -661,6 +661,7 @@ impl ConceptDef {
 }
 
 /// Declarations within a concept
+#[allow(clippy::large_enum_variant)]
 #[cfg_attr(feature = "python", pyclass(frozen, from_py_object))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConceptMember {
@@ -1563,6 +1564,7 @@ impl ThenBlock {
 }
 }
 /// Items in a then block
+#[allow(clippy::large_enum_variant)]
 #[cfg_attr(feature = "python", pyclass(frozen, from_py_object))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ThenItem {

@@ -1004,7 +1004,7 @@ impl<'input> Lexer<'input> {
             .collect();
         self.compact_pending_tokens();
         peek_pending_tokens
-            .iter().filter(|&t| *t != Token::Newline && *t != Token::Indent && *t != Token::Dedent).cloned()
+            .iter().filter(|&t| *t != Token::Newline && *t != Token::Indent && *t != Token::Dedent)
             .count()
             != 0
     }
